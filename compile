@@ -1,2 +1,0 @@
-#!/bin/bash
-/usr/bin/clang++-11 -std=gnu++2a -fcoroutines-ts -stdlib=libc++ -nostdinc++ -isystem/usr/lib/llvm-11/include/c++/v1/ -L/usr/lib/llvm-11/lib/ -Wl,-rpath,/usr/lib/llvm-11/lib/ -o build/main.m $1
