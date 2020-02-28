@@ -18,8 +18,7 @@ target_include_directories( handbatching PUBLIC comparision)
 target_link_libraries( handbatching PRIVATE common)
 
 add_executable( corobatching comparison/corobatching.cpp )
-target_include_directories( corobatching PUBLIC comparision)
-target_include_directories( corobatching PRIVATE include)
+target_include_directories( corobatching PUBLIC comparision include)
 target_link_libraries( corobatching PRIVATE common )
 
 add_executable( main main.m.cpp )
