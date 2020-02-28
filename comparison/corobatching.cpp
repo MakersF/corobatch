@@ -2,7 +2,7 @@
 
 #include <corobatch.hpp>
 
-std::vector<std::string> no_batching(const std::vector<Bar1>& bar1s)
+std::vector<std::string> corobatching(const std::vector<Bar1>& bar1s)
 {
     auto logic = [](const Bar1& bar1, auto&& foo1, auto&& foo2) -> corobatch::task<std::string> {
         Bar2 bar2 = bar1.baz1;
@@ -13,7 +13,7 @@ std::vector<std::string> no_batching(const std::vector<Bar1>& bar1s)
         co_return bar6.baz6;
     };
     std::vector<std::string> res;
-    // Note: the result is not in order
+    // Note: the result is not guaranteed in order
     corobatch::batch(bar1s.begin(), bar1s.end(),
                      [&res](std::vector<Bar1>::const_iterator, std::string&& s) { res.push_back(std::move(s));},
                      logic,
