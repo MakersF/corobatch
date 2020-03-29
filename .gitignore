@@ -1,2 +1,4 @@
 build/
+buildwin/
 .vscode/
+vendor/
