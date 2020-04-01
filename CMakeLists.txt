@@ -16,6 +16,7 @@ add_library( corobatch INTERFACE )
 target_include_directories( corobatch INTERFACE corobatch/include )
 
 add_subdirectory(comparison)
+add_subdirectory(corobatch/examples)
 
 add_executable( main corobatch.m.cpp )
 target_link_libraries( main PRIVATE corobatch )
