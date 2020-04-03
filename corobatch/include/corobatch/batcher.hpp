@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <corobatch/executor.hpp>
+#include <corobatch/private_/log.hpp>
 
 #define MY_FWD(...) ::std::forward<decltype(__VA_ARGS__)>(__VA_ARGS__)
 namespace corobatch {
@@ -35,10 +36,12 @@ bool force_execution(It begin, It end) // requires requires (It it) { *it -> std
 
     if (it == end or (*it)->getNumPendingCoros() == 0)
     {
+        COROBATCH_LOG_DEBUG << "No batcher has pending coros";
         return false;
     }
     else
     {
+        COROBATCH_LOG_DEBUG << "Forcing execution of batcher";
         (*it)->executeBatch();
         return true;
     }
@@ -54,9 +57,8 @@ bool force_execution(Batchers&... batchers)
 template<typename It> // It of IBatcher*
 bool has_any_pending(It begin, It end) // requires requires (It it) { *it -> std::convertible_to<IBatcher*>}
 {
-    return std::any_of(begin, end, [](IBatcher* batcher) {
-        return batcher->getNumPendingCoros() > 0 ;
-    });
+    COROBATCH_LOG_DEBUG << "Checking has_any_pending";
+    return std::any_of(begin, end, [](IBatcher* batcher) { return batcher->getNumPendingCoros() > 0; });
 }
 
 template<typename... Batchers>
@@ -72,6 +74,17 @@ struct ArgTypeList
 };
 
 #if 0
+template<typename T>
+concept Batcher = requires {
+    typename T::AccumulationStorage;
+    typename T::ExecutedResults;
+    typename T::Handle;
+    typename T::Args; // TODO must be an instance of ArgTypeList
+    typename T::ResultType;
+
+    // TODO check the expected methods
+};
+
 struct Batcher {
     using AccumulationStorage = ...;
     using ExecutedResults = ...;
@@ -95,7 +108,10 @@ private:
 
     struct Batch
     {
-        Batch(Batcher& batcher) : d_batcher(batcher), d_storage(d_batcher.get_accumulation_storage()) {}
+        Batch(Batcher& batcher) : d_batcher(batcher), d_storage(d_batcher.get_accumulation_storage())
+        {
+            COROBATCH_LOG_DEBUG << "New batch created";
+        }
         ~Batch() { assert(d_waiting_coros.empty()); }
 
         Batcher& d_batcher;
@@ -108,10 +124,12 @@ private:
     {
         bool await_ready() { return d_batch->d_result.has_value(); }
 
-        auto await_resume()
+        decltype(auto) await_resume()
         {
             assert(await_ready());
-            return d_batch->d_batcher.get_result(d_batcher_handle, d_batch->d_result.value());
+            decltype(auto) result = d_batch->d_batcher.get_result(d_batcher_handle, d_batch->d_result.value());
+            COROBATCH_LOG_DEBUG << "Resuming coro " << private_::PrintIfPossible(result);
+            return MY_FWD(result);
         }
 
         auto await_suspend(std::experimental::coroutine_handle<> h) { d_batch->d_waiting_coros.push_back(h); }
@@ -135,6 +153,11 @@ public:
 
     Awaitable operator()(Args... args)
     {
+        COROBATCH_LOG_DEBUG_BLOCK
+        {
+            COROBATCH_LOG_STREAM << "Recording parameter";
+            ((COROBATCH_LOG_STREAM << ' ' << private_::PrintIfPossible(args)), ...);
+        }
         typename NoRefBatcher::Handle batcherHandle =
             d_batcher.record_arguments(d_current_batch->d_storage, MY_FWD(args)...);
         Awaitable awaitable{batcherHandle, d_current_batch};
@@ -149,6 +172,7 @@ public:
 
     void executeBatch() override
     {
+        COROBATCH_LOG_DEBUG << "Executing batch";
         d_batcher.execute(std::move(d_current_batch->d_storage),
                           [this, currbatch = d_current_batch](typename NoRefBatcher::ExecutedResults results) mutable {
                               assert(not currbatch->d_waiting_coros.empty() && "Did you call the callback twice?");
@@ -156,6 +180,7 @@ public:
                               this->d_executor.schedule_all(currbatch->d_waiting_coros.begin(),
                                                             currbatch->d_waiting_coros.end());
                               currbatch->d_waiting_coros.clear();
+                              COROBATCH_LOG_DEBUG << "Batch execution completed";
                           });
         d_current_batch = make_new_batch();
     }
@@ -180,16 +205,16 @@ BatcherWrapper<Batcher, Args...>
 } // namespace private_
 
 template<typename Batcher>
-auto construct_batcherwrapper(Executor& executor, Batcher&& batcher)
+auto make_batcher(Executor& executor, Batcher&& batcher)
 {
     using Args = typename std::remove_reference_t<Batcher>::Args;
     return private_::construct_batcherwrapper_impl<Batcher>(executor, MY_FWD(batcher), Args{});
 }
 
 template<typename... Batchers>
-auto make_batcher(Executor& executor, Batchers&&... batchers)
+auto make_batchers(Executor& executor, Batchers&&... batchers)
 {
-    return std::make_tuple(construct_batcherwrapper(executor, MY_FWD(batchers))...);
+    return std::make_tuple(make_batcher(executor, MY_FWD(batchers))...);
 }
 
 } // namespace corobatch

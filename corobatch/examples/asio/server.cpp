@@ -28,7 +28,6 @@ void async_accept(tcp::acceptor& acceptor) {
                     }, [](){});
                 }, [](){});
             }
-
             async_accept(acceptor);
         });
 }

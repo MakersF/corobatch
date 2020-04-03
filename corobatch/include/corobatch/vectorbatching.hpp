@@ -73,7 +73,7 @@ public:
     {
         // Asych implementation, schedule the function to be executed later
         d_executor(
-            [& f = d_fun](AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback) mutable {
+            [&f = d_fun](AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback) mutable {
                 try
                 {
                     f(std::move(storage), [callback](typename Base::VectorType r) {
@@ -106,10 +106,7 @@ private:
     F d_fun;
 };
 
-
-constexpr auto immediate_invoke = [](auto&& f, auto&&... args) {
-    return MY_FWD(f)(MY_FWD(args)...);
-};
+constexpr auto immediate_invoke = [](auto&& f, auto&&... args) { return MY_FWD(f)(MY_FWD(args)...); };
 
 using ImmediateInvokeType = decltype(immediate_invoke);
 
@@ -132,18 +129,11 @@ using SyncFunWrapperType = decltype(get_sync_fun_wrapper<R, Arg, OtherArgs...>(s
 
 template<typename F, typename R, typename Arg, typename... OtherArgs>
 class SyncVectorBatcher
-: public VectorBatcher<ImmediateInvokeType,
-                       private_::SyncFunWrapperType<F, R, Arg, OtherArgs...>,
-                       R,
-                       Arg,
-                       OtherArgs...>
+: public VectorBatcher<ImmediateInvokeType, private_::SyncFunWrapperType<F, R, Arg, OtherArgs...>, R, Arg, OtherArgs...>
 {
 private:
-    using Base = VectorBatcher<ImmediateInvokeType,
-                               private_::SyncFunWrapperType<F, R, Arg, OtherArgs...>,
-                               R,
-                               Arg,
-                               OtherArgs...>;
+    using Base =
+        VectorBatcher<ImmediateInvokeType, private_::SyncFunWrapperType<F, R, Arg, OtherArgs...>, R, Arg, OtherArgs...>;
 
 public:
     explicit SyncVectorBatcher(F fun)
@@ -208,7 +198,7 @@ private:
 };
 
 template<typename Batcher>
-SizedBatcher(Batcher&&, std::optional<std::size_t>)->SizedBatcher<Batcher>;
+SizedBatcher(Batcher&&, std::optional<std::size_t>) -> SizedBatcher<Batcher>;
 
 template<typename Batcher, typename WaitState>
 class WaitableBatcher : public Batcher
@@ -244,7 +234,7 @@ private:
 };
 
 template<typename Batcher, typename WaitState>
-WaitableBatcher(Batcher&& batcher, WaitState&& waitState)->WaitableBatcher<Batcher, WaitState>;
+WaitableBatcher(Batcher&& batcher, WaitState&& waitState) -> WaitableBatcher<Batcher, WaitState>;
 
 struct MTWaitState
 {

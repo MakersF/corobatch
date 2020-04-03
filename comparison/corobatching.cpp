@@ -1,5 +1,6 @@
 #include "common.hpp"
 
+#define COROBATCH_LOGGING_TRANSLATION_UNIT
 #include <corobatch/corobatch.hpp>
 
 std::vector<std::string> corobatching(const std::vector<Bar1>& bar1s)
@@ -16,7 +17,7 @@ std::vector<std::string> corobatching(const std::vector<Bar1>& bar1s)
     auto foo1Batcher = corobatch::syncVectorBatcher<Bar3, Bar2>(foo1);
     auto foo2Batcher = corobatch::syncVectorBatcher<Bar5, Bar4>(foo2);
     corobatch::Executor executor;
-    auto [foo1Wrapper, foo2Wrapper] = corobatch::make_batcher(executor, foo1Batcher, foo2Batcher);
+    auto [foo1Wrapper, foo2Wrapper] = corobatch::make_batchers(executor, foo1Batcher, foo2Batcher);
 
     std::size_t completed = 0;
     std::vector<std::string> res;

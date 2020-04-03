@@ -5,6 +5,7 @@
 #include <thread>
 #include <vector>
 
+#define COROBATCH_LOGGING_TRANSLATION_UNIT
 #include <corobatch/corobatch.hpp>
 
 std::vector<std::thread> threads;
@@ -14,6 +15,8 @@ constexpr auto executor = [](auto&& f, auto&&... args) {
 
 int main()
 {
+    corobatch::registerLoggerCb(corobatch::debug_logger);
+
     std::vector<int> data = {0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
 
     auto action = [](int v, auto&& int2dbl, auto&& dblint2str) -> corobatch::task<std::string> {
@@ -44,20 +47,20 @@ int main()
         corobatch::vectorBatcher<std::string, double, int>(
             executor,
             [](const std::vector<std::tuple<double, int>>& params, std::function<void(std::vector<std::string>)> cb) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 std::vector<std::string> res;
                 for (auto&& [dbl, integer] : params)
                 {
                     std::string val = std::to_string(dbl) + "_" + std::to_string(integer);
                     res.push_back(val);
                 }
-                throw std::runtime_error("Error!!");
+                //throw std::runtime_error("Error!!");
                 cb(res);
             }),
         waitState);
 
     corobatch::Executor executor;
-    auto [int2dbl_conv, dblint2str_conv] = corobatch::make_batcher(executor, int2dbl, dblint2str);
+    auto [int2dbl_conv, dblint2str_conv] = corobatch::make_batchers(executor, int2dbl, dblint2str);
 
     int uncompleted = 0;
     for (auto it = data.begin(); it != data.end(); ++it)

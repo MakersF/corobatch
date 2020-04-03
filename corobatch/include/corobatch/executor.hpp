@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <corobatch/private_/log.hpp>
 #include <deque>
 #include <experimental/coroutine>
 
@@ -15,6 +16,7 @@ public:
 
     void run()
     {
+        COROBATCH_LOG_DEBUG << "Running ready coroutines";
         while (not d_ready_coroutines.empty())
         {
             std::experimental::coroutine_handle<> next = d_ready_coroutines.front();
@@ -29,6 +31,7 @@ public:
     void schedule_all(It begin, It end)
     {
         d_ready_coroutines.insert(d_ready_coroutines.end(), begin, end);
+        COROBATCH_LOG_DEBUG << "Coroutines scheduled for execution";
     }
 
 private:
