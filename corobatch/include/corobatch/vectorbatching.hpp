@@ -10,12 +10,40 @@
 #include <type_traits>
 #include <variant>
 #include <vector>
+#include <thread>
 
 #include <corobatch/corobatch.hpp>
 
 #define MY_FWD(...) ::std::forward<decltype(__VA_ARGS__)>(__VA_ARGS__)
 
 namespace corobatch {
+
+constexpr auto immediate_invoke = [](auto&& f, auto&&... args) { return MY_FWD(f)(MY_FWD(args)...); };
+
+using ImmediateInvokeType = decltype(immediate_invoke);
+
+class InvokeOnThread {
+public:
+
+    void join() {
+        for (std::thread& thread : d_threads)
+        {
+            thread.join();
+        }
+        d_threads.clear();
+    }
+
+    ~InvokeOnThread() {
+        join();
+    }
+
+    void operator()(auto&& f, auto&&... args) {
+        d_threads.emplace_back(MY_FWD(f), MY_FWD(args)...);
+    }
+
+private:
+    std::vector<std::thread> d_threads;
+};
 
 namespace private_ {
 
@@ -105,10 +133,6 @@ private:
     Executor d_executor;
     F d_fun;
 };
-
-constexpr auto immediate_invoke = [](auto&& f, auto&&... args) { return MY_FWD(f)(MY_FWD(args)...); };
-
-using ImmediateInvokeType = decltype(immediate_invoke);
 
 namespace private_ {
 

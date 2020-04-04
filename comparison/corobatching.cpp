@@ -1,6 +1,6 @@
 #include "common.hpp"
 
-#define COROBATCH_LOGGING_TRANSLATION_UNIT
+#define COROBATCH_TRANSLATION_UNIT
 #include <corobatch/corobatch.hpp>
 
 std::vector<std::string> corobatching(const std::vector<Bar1>& bar1s)

@@ -2,16 +2,10 @@
 #include <atomic>
 #include <iostream>
 #include <string>
-#include <thread>
 #include <vector>
 
-#define COROBATCH_LOGGING_TRANSLATION_UNIT
+#define COROBATCH_TRANSLATION_UNIT
 #include <corobatch/corobatch.hpp>
-
-std::vector<std::thread> threads;
-constexpr auto executor = [](auto&& f, auto&&... args) {
-    threads.emplace_back(std::forward<decltype(f)>(f), std::forward<decltype(args)>(args)...);
-};
 
 int main()
 {
@@ -19,17 +13,17 @@ int main()
 
     std::vector<int> data = {0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
 
-    auto action = [](int v, auto&& int2dbl, auto&& dblint2str) -> corobatch::task<std::string> {
-        double r = co_await int2dbl(v);
+    auto action = [](int v, auto&& int2double, auto&& double_int2string) -> corobatch::task<std::string> {
+        double r = co_await int2double(v);
         try {
-            auto s = co_await dblint2str(r, v);
-            co_return s + co_await dblint2str(r, v);
+            auto s = co_await double_int2string(r, v);
+            co_return s + co_await double_int2string(r, v);
         } catch (std::exception& e) {
             co_return e.what();
         }
     };
 
-    auto int2dbl =
+    auto int2double =
         corobatch::SizedBatcher(corobatch::syncVectorBatcher<double, int>([](const std::vector<int>& params) {
                                     std::vector<double> res;
                                     for (int v : params)
@@ -43,9 +37,10 @@ int main()
 
     corobatch::MTWaitState waitState;
 
-    auto dblint2str = corobatch::WaitableBatcher(
+    corobatch::InvokeOnThread invokeOnThread;
+    auto double_int2string = corobatch::WaitableBatcher(
         corobatch::vectorBatcher<std::string, double, int>(
-            executor,
+            std::ref(invokeOnThread),
             [](const std::vector<std::tuple<double, int>>& params, std::function<void(std::vector<std::string>)> cb) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 std::vector<std::string> res;
@@ -60,7 +55,7 @@ int main()
         waitState);
 
     corobatch::Executor executor;
-    auto [int2dbl_conv, dblint2str_conv] = corobatch::make_batchers(executor, int2dbl, dblint2str);
+    auto [int2double_conv, double_int2string_conv] = corobatch::make_batchers(executor, int2double, double_int2string);
 
     int uncompleted = 0;
     for (auto it = data.begin(); it != data.end(); ++it)
@@ -71,21 +66,16 @@ int main()
                 std::cout << *it << "=" << result << " ";
                 uncompleted--;
             },
-            action(*it, int2dbl_conv, dblint2str_conv));
+            action(*it, int2double_conv, double_int2string_conv));
     }
 
     while (uncompleted != 0)
     {
         waitState.wait_for_completion();
         executor.run();
-        corobatch::force_execution(int2dbl_conv, dblint2str_conv);
+        corobatch::force_execution(int2double_conv, double_int2string_conv);
     }
 
-    std::cout << "Joining" << std::endl;
-    for (auto& t : threads)
-    {
-        t.join();
-    }
     std::cout << std::endl;
     return 0;
 }

@@ -3,7 +3,7 @@
 
 #include <boost/asio.hpp>
 
-#define COROBATCH_LOGGING_TRANSLATION_UNIT
+#define COROBATCH_TRANSLATION_UNIT
 #include <corobatch/corobatch.hpp>
 
 #include "communicate.hpp"
