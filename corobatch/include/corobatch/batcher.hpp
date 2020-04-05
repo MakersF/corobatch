@@ -73,18 +73,71 @@ struct ArgTypeList
 {
 };
 
-#if 0
-template<typename T>
-concept Batcher = requires {
-    typename T::AccumulationStorage;
-    typename T::ExecutedResults;
-    typename T::Handle;
-    typename T::Args; // TODO must be an instance of ArgTypeList
-    typename T::ResultType;
+namespace private_ {
 
-    // TODO check the expected methods
+template<typename... T>
+struct is_argtypelist : std::false_type
+{
 };
 
+template<typename... T>
+struct is_argtypelist<ArgTypeList<T...>> : std::true_type
+{
+};
+
+template<typename T>
+concept ConceptArgTypeList = is_argtypelist<T>::value;
+
+template<typename T, typename U>
+// 1. Use the standard library one once it's addded.
+// 2. This should be = std::is_same_v<T, U>, but the compiler deduces it to <void, ...> and always fails.
+// Until that is fixed, alway assume it's true
+concept ConceptIsSame = true;
+
+template<typename Batcher, typename AccumulationStorage, typename... Args>
+auto batcher_record_arguments(Batcher& b, AccumulationStorage& as, ArgTypeList<Args...>)
+    -> decltype(b.record_arguments(as, std::declval<Args&&>()...));
+
+} // namespace private_
+
+template<typename T, typename NoRefT = std::remove_reference_t<T>>
+concept ConceptBatcher = requires(T batcher,
+                                  typename NoRefT::AccumulationStorage accumulation_storage,
+                                  typename NoRefT::ExecutedResults executed_result,
+                                  typename NoRefT::Handle handle,
+                                  typename NoRefT::Args args,
+                                  typename NoRefT::ResultType result_type,
+                                  std::function<void(typename NoRefT::ExecutedResults)> ondone_callback)
+{
+    {
+        args
+    }
+    ->private_::ConceptArgTypeList;
+    {
+        batcher.get_accumulation_storage()
+    }
+    ->private_::ConceptIsSame<typename NoRefT::AccumulationStorage>;
+    {
+        batcher_record_arguments(batcher, accumulation_storage, args)
+    }
+    ->private_::ConceptIsSame<typename NoRefT::Handle>;
+    {
+        batcher.execute(std::move(accumulation_storage), std::move(ondone_callback))
+    }
+    ->private_::ConceptIsSame<typename NoRefT::ExecutedResults>;
+    {
+        batcher.get_result(std::move(handle), executed_result)
+    }
+    ->private_::ConceptIsSame<typename NoRefT::ResultType>;
+    {
+        batcher.must_execute(std::as_const(accumulation_storage))
+    }
+    ->private_::ConceptIsSame<bool>;
+};
+
+// Batcher implementation format
+
+/*
 struct Batcher {
     using AccumulationStorage = ...;
     using ExecutedResults = ...;
@@ -93,15 +146,20 @@ struct Batcher {
     using ResultType = ...;
 
     AccumulationStorage get_accumulation_storage();
-    Handle record_elements(AccumulationStorage& , Args&&...);
+    Handle record_arguments(AccumulationStorage& , Args&&...);
     void execute(AccumulationStorage&&, std::function<void(ExecutedResults)>);
-    ResultType get_result(ExecutedResults, const Handle&);
+    ResultType get_result(Handle, ExecutedResults&);
     bool must_execute(const AccumulationStorage&);
 };
-#endif
+*/
 
-template<typename Batcher, typename... Args>
-class BatcherWrapper : public IBatcher
+namespace private_ {
+
+template<ConceptBatcher Batcher, typename ArgsList>
+class BatcherWrapperImpl;
+
+template<ConceptBatcher Batcher, typename... Args>
+class BatcherWrapperImpl<Batcher, ArgTypeList<Args...>> : public IBatcher
 {
 private:
     using NoRefBatcher = std::remove_reference_t<Batcher>;
@@ -140,12 +198,12 @@ private:
     };
 
 public:
-    BatcherWrapper(Executor& executor, Batcher batcher)
+    BatcherWrapperImpl(Executor& executor, Batcher batcher)
     : d_executor(executor), d_batcher(MY_FWD(batcher)), d_current_batch(make_new_batch())
     {
     }
 
-    ~BatcherWrapper()
+    ~BatcherWrapperImpl()
     {
         assert(d_current_batch->d_waiting_coros.empty() &&
                "Force the execution of the batch if it has any pending coroutines");
@@ -193,22 +251,22 @@ private:
     std::shared_ptr<Batch> make_new_batch() { return std::shared_ptr<Batch>(new Batch(d_batcher)); }
 };
 
-namespace private_ {
-
-template<typename Batcher, typename... Args>
-BatcherWrapper<Batcher, Args...>
-    construct_batcherwrapper_impl(Executor& executor, Batcher&& batcher, ArgTypeList<Args...>)
-{
-    return BatcherWrapper<Batcher, Args...>(executor, MY_FWD(batcher));
-}
-
 } // namespace private_
 
-template<typename Batcher>
-auto make_batcher(Executor& executor, Batcher&& batcher)
+template<ConceptBatcher Batcher>
+class BatcherWrapper : public private_::BatcherWrapperImpl<Batcher, typename std::remove_reference_t<Batcher>::Args>
 {
-    using Args = typename std::remove_reference_t<Batcher>::Args;
-    return private_::construct_batcherwrapper_impl<Batcher>(executor, MY_FWD(batcher), Args{});
+private:
+    using Base = private_::BatcherWrapperImpl<Batcher, typename std::remove_reference_t<Batcher>::Args>;
+
+public:
+    using Base::Base;
+};
+
+template<ConceptBatcher Batcher>
+BatcherWrapper<Batcher> make_batcher(Executor& executor, Batcher&& batcher)
+{
+    return BatcherWrapper<Batcher>(executor, MY_FWD(batcher));
 }
 
 template<typename... Batchers>
