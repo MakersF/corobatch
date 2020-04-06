@@ -12,7 +12,8 @@
 #include <vector>
 #include <thread>
 
-#include <corobatch/corobatch.hpp>
+#include <corobatch/private_/log.hpp>
+#include <corobatch/batch.hpp>
 
 #define MY_FWD(...) ::std::forward<decltype(__VA_ARGS__)>(__VA_ARGS__)
 
@@ -48,7 +49,7 @@ private:
 namespace private_ {
 
 template<typename R, typename Arg, typename... OtherArgs>
-struct VectorBatcherTypedefs
+struct VectorAccumulatorTypedefs
 {
     // Internal
     using VectorType = std::vector<R>;
@@ -65,10 +66,10 @@ struct VectorBatcherTypedefs
 } // namespace private_
 
 template<typename Executor, typename F, typename R, typename Arg, typename... OtherArgs>
-struct VectorBatcher : public private_::VectorBatcherTypedefs<R, Arg, OtherArgs...>
+struct VectorAccumulator : public private_::VectorAccumulatorTypedefs<R, Arg, OtherArgs...>
 {
 private:
-    using Base = private_::VectorBatcherTypedefs<R, Arg, OtherArgs...>;
+    using Base = private_::VectorAccumulatorTypedefs<R, Arg, OtherArgs...>;
 
 public:
     using StoredArgs = typename Base::StoredArgs;
@@ -78,7 +79,7 @@ public:
     using Args = typename Base::Args;
     using ResultType = typename Base::ResultType;
 
-    explicit VectorBatcher(Executor executor, F fun) : d_executor(executor), d_fun(MY_FWD(fun)) {}
+    explicit VectorAccumulator(Executor executor, F fun) : d_executor(executor), d_fun(MY_FWD(fun)) {}
 
     AccumulationStorage get_accumulation_storage() { return {}; }
 
@@ -139,7 +140,7 @@ namespace private_ {
 template<typename R, typename Arg, typename... OtherArgs, typename F>
 auto get_sync_fun_wrapper(F&& fun)
 {
-    using VBTypedefs = private_::VectorBatcherTypedefs<R, Arg, OtherArgs...>;
+    using VBTypedefs = private_::VectorAccumulatorTypedefs<R, Arg, OtherArgs...>;
     return [f = MY_FWD(fun)](typename VBTypedefs::AccumulationStorage&& storage,
                              std::function<void(typename VBTypedefs::VectorType)> callback) {
         callback(f(std::move(storage)));
@@ -152,37 +153,38 @@ using SyncFunWrapperType = decltype(get_sync_fun_wrapper<R, Arg, OtherArgs...>(s
 } // namespace private_
 
 template<typename F, typename R, typename Arg, typename... OtherArgs>
-class SyncVectorBatcher
-: public VectorBatcher<ImmediateInvokeType, private_::SyncFunWrapperType<F, R, Arg, OtherArgs...>, R, Arg, OtherArgs...>
+class SyncVectorAccumulator
+: public VectorAccumulator<ImmediateInvokeType, private_::SyncFunWrapperType<F, R, Arg, OtherArgs...>, R, Arg, OtherArgs...>
 {
 private:
     using Base =
-        VectorBatcher<ImmediateInvokeType, private_::SyncFunWrapperType<F, R, Arg, OtherArgs...>, R, Arg, OtherArgs...>;
+        VectorAccumulator<ImmediateInvokeType, private_::SyncFunWrapperType<F, R, Arg, OtherArgs...>, R, Arg, OtherArgs...>;
+
 
 public:
-    explicit SyncVectorBatcher(F fun)
+    explicit SyncVectorAccumulator(F fun)
     : Base(immediate_invoke, private_::get_sync_fun_wrapper<R, Arg, OtherArgs...>(MY_FWD(fun)))
     {
     }
 };
 
 template<typename R, typename Arg, typename... OtherArgs, typename F>
-auto syncVectorBatcher(F fun)
+auto syncVectorAccumulator(F fun)
 {
-    return SyncVectorBatcher<F, R, Arg, OtherArgs...>(fun);
+    return SyncVectorAccumulator<F, R, Arg, OtherArgs...>(fun);
 }
 
 template<typename R, typename Arg, typename... OtherArgs, typename F, typename Executor>
-auto vectorBatcher(Executor ex, F fun)
+auto vectorAccumulator(Executor ex, F fun)
 {
-    return VectorBatcher<Executor, F, R, Arg, OtherArgs...>(ex, fun);
+    return VectorAccumulator<Executor, F, R, Arg, OtherArgs...>(ex, fun);
 }
 
-template<typename Batcher>
-class SizedBatcher : public Batcher
+template<ConceptAccumulator Accumulator>
+class SizedAccumulator : public Accumulator
 {
 private:
-    using Base = Batcher;
+    using Base = Accumulator;
 
 public:
     using StoredArgs = typename Base::StoredArgs;
@@ -192,8 +194,8 @@ public:
     using Args = typename Base::Args;
     using ResultType = typename Base::ResultType;
 
-    explicit SizedBatcher(Batcher&& batcher, std::optional<std::size_t> maxBatchSize)
-    : Batcher(MY_FWD(batcher)), d_maxBatchSize(maxBatchSize)
+    explicit SizedAccumulator(Accumulator&& accumulator, std::optional<std::size_t> maxBatchSize)
+    : Accumulator(MY_FWD(accumulator)), d_maxBatchSize(maxBatchSize)
     {
     }
 
@@ -221,14 +223,14 @@ private:
     std::optional<std::size_t> d_maxBatchSize;
 };
 
-template<typename Batcher>
-SizedBatcher(Batcher&&, std::optional<std::size_t>) -> SizedBatcher<Batcher>;
+template<ConceptAccumulator Accumulator>
+SizedAccumulator(Accumulator&&, std::optional<std::size_t>) -> SizedAccumulator<Accumulator>;
 
-template<typename Batcher, typename WaitState>
-class WaitableBatcher : public Batcher
+template<ConceptAccumulator Accumulator, typename WaitState>
+class WaitableAccumulator : public Accumulator
 {
 private:
-    using Base = Batcher;
+    using Base = Accumulator;
 
 public:
     using StoredArgs = typename Base::StoredArgs;
@@ -238,8 +240,8 @@ public:
     using Args = typename Base::Args;
     using ResultType = typename Base::ResultType;
 
-    explicit WaitableBatcher(Batcher&& batcher, WaitState&& waitState)
-    : Batcher(MY_FWD(batcher)), d_waitState(MY_FWD(waitState))
+    explicit WaitableAccumulator(Accumulator&& accumulator, WaitState&& waitState)
+    : Accumulator(MY_FWD(accumulator)), d_waitState(MY_FWD(waitState))
     {
     }
 
@@ -257,8 +259,8 @@ private:
     WaitState d_waitState;
 };
 
-template<typename Batcher, typename WaitState>
-WaitableBatcher(Batcher&& batcher, WaitState&& waitState) -> WaitableBatcher<Batcher, WaitState>;
+template<ConceptAccumulator Accumulator, typename WaitState>
+WaitableAccumulator(Accumulator&& accumulator, WaitState&& waitState) -> WaitableAccumulator<Accumulator, WaitState>;
 
 struct MTWaitState
 {

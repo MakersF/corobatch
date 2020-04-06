@@ -14,11 +14,11 @@ std::vector<std::string> corobatching(const std::vector<Bar1>& bar1s)
         co_return bar6.baz6;
     };
 
-    auto foo1Batcher = corobatch::syncVectorBatcher<Bar3, Bar2>(foo1);
-    auto foo2Batcher = corobatch::syncVectorBatcher<Bar5, Bar4>(foo2);
-    corobatch::Executor executor;
-    auto [foo1Wrapper, foo2Wrapper] = corobatch::make_batchers(executor, foo1Batcher, foo2Batcher);
+    auto foo1Accumulator = corobatch::syncVectorAccumulator<Bar3, Bar2>(foo1);
+    auto foo2Accumulator = corobatch::syncVectorAccumulator<Bar5, Bar4>(foo2);
+    auto [foo1Batcher, foo2Batcher] = corobatch::make_batchers(foo1Accumulator, foo2Accumulator);
 
+    corobatch::Executor executor;
     std::size_t completed = 0;
     std::vector<std::string> res;
     auto onDone = [&res, &completed](std::string result) {
@@ -28,13 +28,13 @@ std::vector<std::string> corobatching(const std::vector<Bar1>& bar1s)
     // Note: the result is not guaranteed in order
     for (const Bar1& bar : bar1s)
     {
-        corobatch::submit(onDone, logic(bar, foo1Wrapper, foo2Wrapper));
+        corobatch::submit(executor, onDone, logic(bar, foo1Batcher, foo2Batcher));
     }
 
     while (completed != bar1s.size())
     {
         executor.run();
-        corobatch::force_execution(foo1Wrapper, foo2Wrapper);
+        corobatch::force_execution(foo1Batcher, foo2Batcher);
     }
     return res;
 }

@@ -5,3 +5,4 @@ add_library( nop INTERFACE )
 target_include_directories( nop INTERFACE  ${CMAKE_SOURCE_DIR}/vendor/libnop/include )
 
 add_subdirectory( asio )
+add_subdirectory( pipeipc )

@@ -64,8 +64,6 @@ int main(int argc, char* argv[])
 
     corobatch::registerLoggerCb(corobatch::debug_logger);
 
-    std::vector<int> request = {1, 2, 3, 4};
-
     asio::io_context io_context;
     tcp::resolver resolver{io_context};
     auto endpoints = resolver.resolve(argv[1], argv[2]);
@@ -73,12 +71,12 @@ int main(int argc, char* argv[])
     corobatch::Executor executor;
     std::vector<corobatch::IBatcher*> batchers;
 
-    // When the batcher executes, it will immediately invoke rpc_power_of_2. Once we receive the data back,
-    // we notify the batcher of the received data and we schedule the executor to run again,
-    // since the received will have unblocked some tasks.
-    auto rpc_power_of_2_batcher = corobatch::vectorBatcher<int, int>(
+    // When the accumulator executes, it will immediately invoke rpc_power_of_2. Once we receive the data back,
+    // asio calls the function to notify of the received data and we schedule the executor to run again,
+    // since the received response will have unblocked some tasks.
+    auto rpc_power_of_2_accumulator = corobatch::vectorAccumulator<int, int>(
         corobatch::immediate_invoke, [&](std::vector<int> params, std::function<void(std::vector<int>)> cb) {
-            // cb should be called with the result of processisng 'params'
+            // cb should be called with the result of processing 'params'
             rpc_power_of_2(io_context, endpoints, params, [&, cb](std::vector<int> response) {
                 cb(response);
                 asio::post(io_context, [&]() {
@@ -93,15 +91,15 @@ int main(int argc, char* argv[])
         });
 
     // Prepare the batcher to be used with the given executor inside the coroutine
-    auto rpc_power_of_2_batch_conv = corobatch::make_batcher(executor, rpc_power_of_2_batcher);
-    batchers.push_back(std::addressof(rpc_power_of_2_batch_conv));
+    auto rpc_power_of_2_batcher = corobatch::Batcher(rpc_power_of_2_accumulator);
+    batchers.push_back(std::addressof(rpc_power_of_2_batcher));
 
     // Function to create the task
-    auto make_task = [&rpc_power_of_2_batch_conv](int elem) -> corobatch::task<int> {
+    auto make_task = [&rpc_power_of_2_batcher](int elem) -> corobatch::task<int> {
         std::cout << "Starting: " << elem << std::endl;
-        int pow2 = co_await rpc_power_of_2_batch_conv(elem);
+        int pow2 = co_await rpc_power_of_2_batcher(elem);
         std::cout << "Resuming 1: " << elem << std::endl;
-        int pow4 = co_await rpc_power_of_2_batch_conv(pow2);
+        int pow4 = co_await rpc_power_of_2_batcher(pow2);
         std::cout << "Resuming 2: " << elem << std::endl;
         co_return pow4 - pow2;
     };
@@ -110,7 +108,7 @@ int main(int argc, char* argv[])
     std::vector<int> data_to_process = {1, 2, 3, 4};
     for (int i : data_to_process)
     {
-        corobatch::submit([i](int result) { std::cout << i << " = " << result << std::endl; }, make_task(i));
+        corobatch::submit(executor, [i](int result) { std::cout << i << " = " << result << std::endl; }, make_task(i));
     }
 
     // The tasks eagerly started executing, and they might be blocked.

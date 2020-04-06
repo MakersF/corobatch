@@ -24,7 +24,7 @@ int main()
     };
 
     auto int2double =
-        corobatch::SizedBatcher(corobatch::syncVectorBatcher<double, int>([](const std::vector<int>& params) {
+        corobatch::SizedAccumulator(corobatch::syncVectorAccumulator<double, int>([](const std::vector<int>& params) {
                                     std::vector<double> res;
                                     for (int v : params)
                                     {
@@ -38,8 +38,8 @@ int main()
     corobatch::MTWaitState waitState;
 
     corobatch::InvokeOnThread invokeOnThread;
-    auto double_int2string = corobatch::WaitableBatcher(
-        corobatch::vectorBatcher<std::string, double, int>(
+    auto double_int2string = corobatch::WaitableAccumulator(
+        corobatch::vectorAccumulator<std::string, double, int>(
             std::ref(invokeOnThread),
             [](const std::vector<std::tuple<double, int>>& params, std::function<void(std::vector<std::string>)> cb) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -55,13 +55,13 @@ int main()
         waitState);
 
     corobatch::Executor executor;
-    auto [int2double_conv, double_int2string_conv] = corobatch::make_batchers(executor, int2double, double_int2string);
+    auto [int2double_conv, double_int2string_conv] = corobatch::make_batchers(int2double, double_int2string);
 
     int uncompleted = 0;
     for (auto it = data.begin(); it != data.end(); ++it)
     {
         uncompleted++;
-        corobatch::submit(
+        corobatch::submit(executor,
             [it, &uncompleted](std::string result) {
                 std::cout << *it << "=" << result << " ";
                 uncompleted--;
