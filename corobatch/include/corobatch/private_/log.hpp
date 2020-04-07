@@ -11,6 +11,7 @@
 #define COROBATCH_PRINT_LOGLINE_PREFIX(stream) \
     stream << __FILE__ << ":" << __LINE__ << " " << (COROBATCH_LOGLEVEL_NAME) << " "
 
+#ifndef COROBATCH_DISABLE_LOGGING
 // Get the log stream ptr, check if it's valid, if it is, the body of the loop will be executed.
 // In the increment statement, use the comma operator to put a new line at the end of the stream
 // and then reset the pointer so that we don't enter the loop anymore
@@ -20,6 +21,11 @@
         for (::std::ostream* COROBATCH_STREAM_NAME = ::corobatch::private_::getLogStream((level));               \
              COROBATCH_STREAM_NAME != nullptr && (COROBATCH_PRINT_LOGLINE_PREFIX(*COROBATCH_STREAM_NAME), true); \
              COROBATCH_STREAM_NAME = (*(COROBATCH_STREAM_NAME) << '\n', nullptr))
+#else
+#define COROBATCH_LOG_BLOCK(level, levelname)         \
+    for (const char* COROBATCH_LOGLEVEL_NAME; false;) \
+        for (::std::ostream * COROBATCH_STREAM_NAME; false;)
+#endif
 
 #define COROBATCH_LOG_STREAM (*(COROBATCH_STREAM_NAME))
 
