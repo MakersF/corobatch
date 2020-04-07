@@ -1,19 +1,16 @@
 #ifndef COROBATCH_BATCH_HPP
 #define COROBATCH_BATCH_HPP
 
-#include <cassert>
-#include <experimental/coroutine>
-#include <functional>
-#include <deque>
 #include <algorithm>
 #include <cassert>
+#include <deque>
 #include <experimental/coroutine>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <tuple>
-#include <vector>
 #include <unordered_map>
+#include <vector>
 
 #include <corobatch/logging.hpp>
 #include <corobatch/private_/log.hpp>
@@ -48,8 +45,10 @@ public:
         COROBATCH_LOG_DEBUG << "Coroutines scheduled for execution";
     }
 
-    std::optional<std::experimental::coroutine_handle<>> pop_next_coro() {
-        if (d_ready_coroutines.empty()) {
+    std::optional<std::experimental::coroutine_handle<>> pop_next_coro()
+    {
+        if (d_ready_coroutines.empty())
+        {
             return std::nullopt;
         }
         std::experimental::coroutine_handle<> next_coro = d_ready_coroutines.front();
@@ -115,19 +114,20 @@ public:
         std::experimental::suspend_never final_suspend() { return {}; }
 
         template<typename RebindableAwaitable>
-        decltype(auto) await_transform(RebindableAwaitable&& awaitable) {
+        decltype(auto) await_transform(RebindableAwaitable&& awaitable)
+        {
             assert(d_executor && "The executor needs to be registered in the promise when the task is started");
             return MY_FWD(awaitable).rebind_executor(*d_executor);
         }
 
-        void bind_executor(Executor& executor) {
+        void bind_executor(Executor& executor)
+        {
             assert(d_executor == nullptr);
             d_executor = std::addressof(executor);
         }
 
-        private:
-            Executor* d_executor = nullptr;
-
+    private:
+        Executor* d_executor = nullptr;
     };
 
 private:
@@ -170,11 +170,7 @@ void submit(Executor& executor, OnDone&& onDone, task<ReturnType> taskObj)
 
 inline constexpr auto sink = [](auto&&...) {};
 
-inline void submit(Executor& executor, task<void> task)
-{
-    submit(executor, sink, std::move(task));
-}
-
+inline void submit(Executor& executor, task<void> task) { submit(executor, sink, std::move(task)); }
 
 class IBatcher
 {
@@ -329,13 +325,15 @@ private:
 
     struct Batch : std::enable_shared_from_this<Batch>
     {
-        Batch(Accumulator& accumulator) : d_accumulator(accumulator), d_storage(d_accumulator.get_accumulation_storage())
+        Batch(Accumulator& accumulator)
+        : d_accumulator(accumulator), d_storage(d_accumulator.get_accumulation_storage())
         {
             COROBATCH_LOG_DEBUG << "New batch created";
         }
         ~Batch() { assert(d_waiting_coros.empty()); }
 
-        void execute() {
+        void execute()
+        {
             COROBATCH_LOG_DEBUG << "Executing batch";
             assert(not d_waiting_coros.empty() && "Do not execute empty batches");
             d_accumulator.execute(std::move(d_storage),
@@ -359,9 +357,7 @@ private:
 
     struct Awaitable
     {
-        bool await_ready() {
-            return d_batch->d_result.has_value();
-        }
+        bool await_ready() { return d_batch->d_result.has_value(); }
 
         decltype(auto) await_resume()
         {
@@ -371,7 +367,8 @@ private:
             return MY_FWD(result);
         }
 
-        auto await_suspend(std::experimental::coroutine_handle<> h) {
+        auto await_suspend(std::experimental::coroutine_handle<> h)
+        {
             d_batch->d_waiting_coros[std::addressof(d_executor)].push_back(h);
             std::optional<std::experimental::coroutine_handle<>> next_coro = d_executor.pop_next_coro();
             return next_coro ? next_coro.value() : std::experimental::noop_coroutine();
@@ -383,21 +380,20 @@ private:
         std::shared_ptr<Batch> d_batch;
     };
 
-    struct RebindableAwaitable {
-        Awaitable rebind_executor(Executor& executor) && {
+    struct RebindableAwaitable
+    {
+        Awaitable rebind_executor(Executor& executor) &&
+        {
             return Awaitable{executor, MY_FWD(d_batcher_handle), d_batch};
         }
 
-        //private:
+        // private:
         typename NoRefAccumulator::Handle d_batcher_handle;
         std::shared_ptr<Batch> d_batch;
     };
 
 public:
-    BatcherBase(Accumulator accumulator)
-    : d_accumulator(MY_FWD(accumulator)), d_current_batch(make_new_batch())
-    {
-    }
+    BatcherBase(Accumulator accumulator) : d_accumulator(MY_FWD(accumulator)), d_current_batch(make_new_batch()) {}
 
     ~BatcherBase()
     {

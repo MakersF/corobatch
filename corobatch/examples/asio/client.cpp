@@ -108,7 +108,8 @@ int main(int argc, char* argv[])
     std::vector<int> data_to_process = {1, 2, 3, 4};
     for (int i : data_to_process)
     {
-        corobatch::submit(executor, [i](int result) { std::cout << i << " = " << result << std::endl; }, make_task(i));
+        corobatch::submit(
+            executor, [i](int result) { std::cout << i << " = " << result << std::endl; }, make_task(i));
     }
 
     // The tasks eagerly started executing, and they might be blocked.

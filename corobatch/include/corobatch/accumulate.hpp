@@ -7,14 +7,14 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <tuple>
 #include <type_traits>
 #include <variant>
 #include <vector>
-#include <thread>
 
-#include <corobatch/private_/log.hpp>
 #include <corobatch/batch.hpp>
+#include <corobatch/private_/log.hpp>
 
 #define MY_FWD(...) ::std::forward<decltype(__VA_ARGS__)>(__VA_ARGS__)
 
@@ -24,10 +24,11 @@ constexpr auto immediate_invoke = [](auto&& f, auto&&... args) { return MY_FWD(f
 
 using ImmediateInvokeType = decltype(immediate_invoke);
 
-class InvokeOnThread {
+class InvokeOnThread
+{
 public:
-
-    void join() {
+    void join()
+    {
         for (std::thread& thread : d_threads)
         {
             thread.join();
@@ -35,13 +36,9 @@ public:
         d_threads.clear();
     }
 
-    ~InvokeOnThread() {
-        join();
-    }
+    ~InvokeOnThread() { join(); }
 
-    void operator()(auto&& f, auto&&... args) {
-        d_threads.emplace_back(MY_FWD(f), MY_FWD(args)...);
-    }
+    void operator()(auto&& f, auto&&... args) { d_threads.emplace_back(MY_FWD(f), MY_FWD(args)...); }
 
 private:
     std::vector<std::thread> d_threads;
@@ -155,12 +152,18 @@ using SyncFunWrapperType = decltype(get_sync_fun_wrapper<R, Arg, OtherArgs...>(s
 
 template<typename F, typename R, typename Arg, typename... OtherArgs>
 class SyncVectorAccumulator
-: public VectorAccumulator<ImmediateInvokeType, private_::SyncFunWrapperType<F, R, Arg, OtherArgs...>, R, Arg, OtherArgs...>
+: public VectorAccumulator<ImmediateInvokeType,
+                           private_::SyncFunWrapperType<F, R, Arg, OtherArgs...>,
+                           R,
+                           Arg,
+                           OtherArgs...>
 {
 private:
-    using Base =
-        VectorAccumulator<ImmediateInvokeType, private_::SyncFunWrapperType<F, R, Arg, OtherArgs...>, R, Arg, OtherArgs...>;
-
+    using Base = VectorAccumulator<ImmediateInvokeType,
+                                   private_::SyncFunWrapperType<F, R, Arg, OtherArgs...>,
+                                   R,
+                                   Arg,
+                                   OtherArgs...>;
 
 public:
     explicit SyncVectorAccumulator(F fun)
@@ -227,29 +230,33 @@ private:
 namespace private_ {
 
 template<typename T>
-concept HasSize = requires (T& obj) {
-    { obj.size() } -> private_::ConceptIsSame<std::size_t>;
+concept HasSize = requires(T& obj)
+{
+    {
+        obj.size()
+    }
+    ->private_::ConceptIsSame<std::size_t>;
 };
 
-};
+}; // namespace private_
 
 // Specialization for types which already keep track of their size
-template<ConceptAccumulator Accumulator> requires private_::HasSize<typename Accumulator::AccumulationStorage>
-class SizedAccumulator<Accumulator> : public Accumulator
+template<ConceptAccumulator Accumulator>
+requires private_::HasSize<typename Accumulator::AccumulationStorage> class SizedAccumulator<Accumulator>
+: public Accumulator
 {
 private:
     using Base = Accumulator;
 
 public:
     explicit SizedAccumulator(Accumulator&& accumulator, std::optional<std::size_t> maxBatchSize)
-        : Accumulator(MY_FWD(accumulator)), d_maxBatchSize(maxBatchSize)
-        {
-        }
+    : Accumulator(MY_FWD(accumulator)), d_maxBatchSize(maxBatchSize)
+    {
+    }
 
     bool must_execute(const typename Base::AccumulationStorage& storage)
     {
-        return (d_maxBatchSize.has_value() and storage.size() >= d_maxBatchSize.value()) or
-               Base::must_execute(storage);
+        return (d_maxBatchSize.has_value() and storage.size() >= d_maxBatchSize.value()) or Base::must_execute(storage);
     }
 
 private:
