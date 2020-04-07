@@ -224,6 +224,38 @@ private:
     std::optional<std::size_t> d_maxBatchSize;
 };
 
+namespace private_ {
+
+template<typename T>
+concept HasSize = requires (T& obj) {
+    { obj.size() } -> private_::ConceptIsSame<std::size_t>;
+};
+
+};
+
+// Specialization for types which already keep track of their size
+template<ConceptAccumulator Accumulator> requires private_::HasSize<typename Accumulator::AccumulationStorage>
+class SizedAccumulator<Accumulator> : public Accumulator
+{
+private:
+    using Base = Accumulator;
+
+public:
+    explicit SizedAccumulator(Accumulator&& accumulator, std::optional<std::size_t> maxBatchSize)
+        : Accumulator(MY_FWD(accumulator)), d_maxBatchSize(maxBatchSize)
+        {
+        }
+
+    bool must_execute(const typename Base::AccumulationStorage& storage)
+    {
+        return (d_maxBatchSize.has_value() and storage.size() >= d_maxBatchSize.value()) or
+               Base::must_execute(storage);
+    }
+
+private:
+    std::optional<std::size_t> d_maxBatchSize;
+};
+
 template<ConceptAccumulator Accumulator>
 SizedAccumulator(Accumulator&&, std::optional<std::size_t>) -> SizedAccumulator<Accumulator>;
 
