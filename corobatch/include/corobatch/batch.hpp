@@ -254,19 +254,42 @@ concept ConceptIsSame = true;
 // This template is never called, it's only used in the concept to check that the record_arguments
 // method can take the Args...
 template<typename Accumulator, typename AccumulationStorage, typename... Args>
-auto accumulator_record_arguments(Accumulator& ac, AccumulationStorage& as, ArgTypeList<Args...>)
+auto accumulator_record_arguments(const Accumulator& ac, AccumulationStorage& as, ArgTypeList<Args...>)
     -> decltype(ac.record_arguments(as, std::declval<Args&&>()...));
+
+using ExecutorCoroMap = std::unordered_map<Executor*, std::vector<std::experimental::coroutine_handle<>>>;
+
+template<typename ResultType>
+auto make_callback(std::shared_ptr<void> keep_alive, ExecutorCoroMap& waiting_coros, std::optional<ResultType>& result)
+{
+    return [keep_alive = std::move(keep_alive), &waiting_coros, &result](ResultType results) mutable {
+        assert(not waiting_coros.empty() && "Did you call the callback twice?");
+        result = std::move(results);
+        for (auto& [executor_ptr, coroutines] : waiting_coros)
+        {
+            executor_ptr->schedule_all(coroutines.begin(), coroutines.end());
+            coroutines.clear();
+        }
+        waiting_coros.clear();
+        COROBATCH_LOG_DEBUG << "Batch execution completed";
+    };
+}
+
+template<typename ResultType>
+using CallbackType = decltype(make_callback(std::declval<std::shared_ptr<void*>>(),
+                                            std::declval<ExecutorCoroMap&>(),
+                                            std::declval<std::optional<ResultType>&>()));
 
 } // namespace private_
 
 template<typename Acc, typename NoRefAcc = std::remove_reference_t<Acc>>
-concept ConceptAccumulator = requires(Acc accumulator,
-                                  typename NoRefAcc::AccumulationStorage accumulation_storage,
-                                  typename NoRefAcc::ExecutedResults executed_result,
-                                  typename NoRefAcc::Handle handle,
-                                  typename NoRefAcc::Args args,
-                                  typename NoRefAcc::ResultType result_type,
-                                  std::function<void(typename NoRefAcc::ExecutedResults)> ondone_callback)
+concept ConceptAccumulator = requires(const Acc& accumulator,
+                                      typename NoRefAcc::AccumulationStorage accumulation_storage,
+                                      typename NoRefAcc::ExecutedResults executed_result,
+                                      typename NoRefAcc::Handle handle,
+                                      typename NoRefAcc::Args args,
+                                      typename NoRefAcc::ResultType result_type,
+                                      private_::CallbackType<typename NoRefAcc::ExecutedResults> ondone_callback)
 {
     {
         args
@@ -277,7 +300,7 @@ concept ConceptAccumulator = requires(Acc accumulator,
     }
     ->private_::ConceptIsSame<typename NoRefAcc::AccumulationStorage>;
     {
-        accumulator_record_arguments(accumulator, accumulation_storage, args)
+        private_::accumulator_record_arguments(accumulator, accumulation_storage, args)
     }
     ->private_::ConceptIsSame<typename NoRefAcc::Handle>;
     {
@@ -301,7 +324,7 @@ struct Accumulator {
     using AccumulationStorage = ...;
     using ExecutedResults = ...;
     using Handle = ...;
-    using Args = ArgTypeList<...>;
+    using Args = corobatch::ArgTypeList<...>;
     using ResultType = ...;
 
     AccumulationStorage get_accumulation_storage();
@@ -336,20 +359,15 @@ private:
         {
             COROBATCH_LOG_DEBUG << "Executing batch";
             assert(not d_waiting_coros.empty() && "Do not execute empty batches");
+            // Aliasing pointer to share ownership to the batch, but without the need
+            // to expose the type.
+            // This allows to have the callback type be dependent only on the result type
+            auto keep_alive = std::shared_ptr<void>(this->shared_from_this(), nullptr);
             d_accumulator.execute(std::move(d_storage),
-                [this_ptr = this->shared_from_this()](typename NoRefAccumulator::ExecutedResults results) mutable {
-                    assert(not this_ptr->d_waiting_coros.empty() && "Did you call the callback twice?");
-                    this_ptr->d_result = std::move(results);
-                    for(auto& [executor_ptr, coroutines] : this_ptr->d_waiting_coros) {
-                        executor_ptr->schedule_all(coroutines.begin(), coroutines.end());
-                        coroutines.clear();
-                    }
-                    this_ptr->d_waiting_coros.clear();
-                    COROBATCH_LOG_DEBUG << "Batch execution completed";
-                });
+                                  make_callback(std::move(keep_alive), d_waiting_coros, d_result));
         }
 
-        Accumulator& d_accumulator;
+        const Accumulator& d_accumulator;
         typename NoRefAccumulator::AccumulationStorage d_storage;
         std::optional<typename NoRefAccumulator::ExecutedResults> d_result;
         std::unordered_map<Executor*, std::vector<std::experimental::coroutine_handle<>>> d_waiting_coros;

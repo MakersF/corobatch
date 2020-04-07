@@ -125,21 +125,21 @@ struct MyAccumulator {
     using AccumulationStorage = /* the type where to store the parameters. Example: a vector */;
     using ExecutedResults = /* the type which contains the result of the batch operation. Example: a vector */;
     using Handle = /* the type to retrieve the element for a single task from the result. Example: an index into the vector */;
-    using Args = ArgTypeList<Arg1, Arg2, Arg3 /*the list of parameters that the function is going to provide when calling the batch */>;
+    using Args = corobatch::ArgTypeList<Arg1, Arg2, Arg3 /* the list of parameters that should be batched */>;
     using ResultType = /* the single type that is returned to the task.*/;
 
     // Create a new object to store arguments into
-    AccumulationStorage get_accumulation_storage();
+    AccumulationStorage get_accumulation_storage() const;
     // Store the arguments inside the accumulation storage and return the handle that will be used to
     // look up the element in the result
-    Handle record_arguments(AccumulationStorage& , Arg1&&, Arg2&&, Arg3&& /* the same as inside the ArgTypeList */);
+    Handle record_arguments(AccumulationStorage& , Arg1&&, Arg2&&, Arg3&& /* the same as inside the ArgTypeList */) const;
     // Start the execution of the batch operation with the parameters stored in the storage.
     // Call the provided function with the result when done
-    void execute(AccumulationStorage&&, std::function<void(ExecutedResults)>);
+    void execute(AccumulationStorage&&, std::function<void(ExecutedResults)>) const;
     // Extract the single item to return to the task from the executed result
-    ResultType get_result(Handle, ExecutedResults&);
+    ResultType get_result(Handle, ExecutedResults&) const;
     // Tell whether the accumulator must execute (for example when a maximum number of items has been addded to the storage)
-    bool must_execute(const AccumulationStorage&);
+    bool must_execute(const AccumulationStorage&) const;
 };
 ```
 

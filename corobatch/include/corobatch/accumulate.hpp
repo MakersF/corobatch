@@ -79,9 +79,9 @@ public:
 
     explicit VectorAccumulator(Executor executor, F fun) : d_executor(executor), d_fun(MY_FWD(fun)) {}
 
-    AccumulationStorage get_accumulation_storage() { return {}; }
+    AccumulationStorage get_accumulation_storage() const { return {}; }
 
-    Handle record_arguments(AccumulationStorage& storage, Arg arg, OtherArgs... otherArgs)
+    Handle record_arguments(AccumulationStorage& storage, Arg arg, OtherArgs... otherArgs) const
     {
         if constexpr (sizeof...(OtherArgs) == 0)
         {
@@ -94,9 +94,9 @@ public:
         return storage.size() - 1;
     }
 
-    bool must_execute(const AccumulationStorage&) { return false; }
+    bool must_execute(const AccumulationStorage&) const { return false; }
 
-    void execute(AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback)
+    void execute(AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback) const
     {
         // Asych implementation, schedule the function to be executed later
         d_executor(
@@ -116,7 +116,7 @@ public:
             std::move(callback));
     }
 
-    ResultType get_result(Handle h, const ExecutedResults& r)
+    ResultType get_result(Handle h, const ExecutedResults& r) const
     {
         if (r.index() == 0)
         {
@@ -203,22 +203,22 @@ public:
     {
     }
 
-    AccumulationStorage get_accumulation_storage() { return std::make_pair(0, Base::get_accumulation_storage()); }
+    AccumulationStorage get_accumulation_storage() const { return std::make_pair(0, Base::get_accumulation_storage()); }
 
     template<typename... Args>
-    Handle record_arguments(AccumulationStorage& storage, Args&&... args)
+    Handle record_arguments(AccumulationStorage& storage, Args&&... args) const
     {
         ++storage.first;
         return Base::record_arguments(storage.second, MY_FWD(args)...);
     }
 
-    bool must_execute(const AccumulationStorage& storage)
+    bool must_execute(const AccumulationStorage& storage) const
     {
         return (d_maxBatchSize.has_value() and storage.first >= d_maxBatchSize.value()) or
                Base::must_execute(storage.second);
     }
 
-    void execute(AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback)
+    void execute(AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback) const
     {
         Base::execute(std::move(storage).second, std::move(callback));
     }
@@ -254,7 +254,7 @@ public:
     {
     }
 
-    bool must_execute(const typename Base::AccumulationStorage& storage)
+    bool must_execute(const typename Base::AccumulationStorage& storage) const
     {
         return (d_maxBatchSize.has_value() and storage.size() >= d_maxBatchSize.value()) or Base::must_execute(storage);
     }
@@ -285,7 +285,7 @@ public:
     {
     }
 
-    void execute(AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback)
+    void execute(AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback) const
     {
         Base::execute(std::move(storage),
                       [cookie = d_waitState.executionStarted(), cb = std::move(callback), &waitState = d_waitState](
