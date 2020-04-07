@@ -1,4 +1,5 @@
-#pragma once
+#ifndef COROBATCH_ACCUMULATE_HPP
+#define COROBATCH_ACCUMULATE_HPP
 
 #include <cassert>
 #include <condition_variable>
@@ -297,3 +298,4 @@ private:
 } // namespace corobatch
 
 #undef MY_FWD
+#endif

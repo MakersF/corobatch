@@ -1,4 +1,5 @@
-#pragma once
+#ifndef COROBATCH_PRIVATE_LOG_HPP
+#define COROBATCH_PRIVATE_LOG_HPP
 
 #include <corobatch/logging.hpp>
 #include <iomanip>
@@ -72,3 +73,5 @@ struct PrintIfPossible
 
 } // namespace private_
 } // namespace corobatch
+
+#endif

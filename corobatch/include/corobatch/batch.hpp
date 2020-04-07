@@ -1,4 +1,5 @@
-#pragma once
+#ifndef COROBATCH_BATCH_HPP
+#define COROBATCH_BATCH_HPP
 
 #include <cassert>
 #include <experimental/coroutine>
@@ -460,3 +461,4 @@ auto make_batchers(Accumulators&&... accumulators)
 } // namespace corobatch
 
 #undef MY_FWD
+#endif

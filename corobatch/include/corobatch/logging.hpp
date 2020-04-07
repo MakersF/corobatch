@@ -1,4 +1,5 @@
-#pragma once
+#ifndef COROBATCH_LOGGING_HPP
+#define COROBATCH_LOGGING_HPP
 
 #include <functional>
 #include <iosfwd>
@@ -31,4 +32,6 @@ std::ostream* getLogStream(LogLevel);
 
 #ifdef COROBATCH_TRANSLATION_UNIT
 #include <corobatch/private_/logging.cpp>
+#endif
+
 #endif
