@@ -1,5 +1,5 @@
-#include <benchmark/benchmark.h>
 #include <algorithm>
+#include <benchmark/benchmark.h>
 #include <random>
 
 #include <array>
@@ -26,7 +26,8 @@ class FusedMulAdd
         }
     };
 
-    struct Storage {
+    struct Storage
+    {
         FloatPack a;
         FloatPack b;
         FloatPack c;
@@ -70,7 +71,7 @@ public:
 
 static auto setup_data(std::size_t size)
 {
-    std::default_random_engine rng{ std::random_device{}()};
+    std::default_random_engine rng{std::random_device{}()};
     std::vector<float> as(size, 0.f);
     std::iota(as.begin(), as.end(), 0);
     std::shuffle(as.begin(), as.end(), rng);
@@ -81,9 +82,11 @@ static auto setup_data(std::size_t size)
     return std::make_tuple(as, bs, cs);
 }
 
-static void BM_fma_loop(benchmark::State& state) {
+static void BM_fma_loop(benchmark::State& state)
+{
     const auto& [as, bs, cs] = setup_data(static_cast<std::size_t>(state.range(0)));
-    for (auto _ : state) {
+    for (auto _ : state)
+    {
         float sum = 0;
         for (std::size_t i = 0; i < as.size(); i++)
         {
@@ -97,9 +100,11 @@ static void BM_fma_loop(benchmark::State& state) {
 BENCHMARK(BM_fma_loop)->Range(8, 8 << 10);
 
 // Define another benchmark
-static void BM_fma_corobatch(benchmark::State& state) {
+static void BM_fma_corobatch(benchmark::State& state)
+{
     const auto& [as, bs, cs] = setup_data(state.range(0));
-    for (auto _ : state) {
+    for (auto _ : state)
+    {
         float sum = 0;
         auto onDone = [&sum](float result) {
             // std::cout << "result = " << result << std::endl;
@@ -116,10 +121,7 @@ static void BM_fma_corobatch(benchmark::State& state) {
         auto fmadd = corobatch::Batcher<FusedMulAdd>(fmaddAccumulator);
         for (std::size_t i = 0; i < as.size(); i++)
         {
-            corobatch::submit(
-                executor,
-                onDone,
-                action(as[i], bs[i], cs[i], fmadd));
+            corobatch::submit(executor, onDone, action(as[i], bs[i], cs[i], fmadd));
         }
 
         corobatch::force_execution(fmadd);

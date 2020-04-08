@@ -63,27 +63,29 @@ private:
 
 namespace private_ {
 
-
 template<typename F, typename... Args>
 concept Invokable = std::is_invocable_v<F, Args...>;
 
 template<typename T>
-struct FunctionCallbackType {
+struct FunctionCallbackType
+{
     using type = std::function<void(T)>;
 };
 
 template<>
-struct FunctionCallbackType<void> {
+struct FunctionCallbackType<void>
+{
     using type = std::function<void()>;
 };
 
-}
+} // namespace private_
 
 template<typename T, typename CallbackType = typename private_::FunctionCallbackType<T>::type>
 class task
 {
 private:
-    struct promise_callback_storage {
+    struct promise_callback_storage
+    {
         void set_on_return_value_cb(CallbackType cb)
         {
             assert(not d_cb);

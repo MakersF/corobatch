@@ -99,10 +99,7 @@ public:
         d_executor(d_fun, std::move(storage), std::move(callback));
     }
 
-    ResultType get_result(Handle h, const ExecutedResults& r) const
-    {
-        return r[h];
-    }
+    ResultType get_result(Handle h, const ExecutedResults& r) const { return r[h]; }
 
 private:
     Executor d_executor;
