@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+function print_file() {
+    SED_COMMAND='s|#include <corobatch/\([^>]*\)>|// #include <corobatch/\1> // Removed during single header generation|g'
+    echo
+    echo "//////////////////////////////////////////////////////////////////////"
+    echo "// Start file: $1"
+    echo "//////////////////////////////////////////////////////////////////////"
+    echo
+    cat "corobatch/include/$1" | sed "$SED_COMMAND"
+    echo
+    echo "//////////////////////////////////////////////////////////////////////"
+    echo "// End file: $1"
+    echo "//////////////////////////////////////////////////////////////////////"
+    echo
+
+}
+
+echo "// Generated on $(date)"
+echo "// Commit: $(git rev-parse HEAD)"
+print_file corobatch/logging.hpp
+print_file corobatch/private_/logging.cpp
+print_file corobatch/private_/log.hpp
+print_file corobatch/batch.hpp
+print_file corobatch/accumulate.hpp
