@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -38,10 +39,9 @@ public:
 
     ~Executor() { assert(d_ready_coroutines.empty()); }
 
-    template<typename It>
-    void schedule_all(It begin, It end)
+    void schedule_all(std::span<std::experimental::coroutine_handle<>> new_coros)
     {
-        d_ready_coroutines.insert(d_ready_coroutines.end(), begin, end);
+        d_ready_coroutines.insert(d_ready_coroutines.end(), new_coros.begin(), new_coros.end());
         COROBATCH_LOG_DEBUG << "Coroutines scheduled for execution";
     }
 
@@ -268,7 +268,7 @@ auto make_callback(std::shared_ptr<void> keep_alive, ExecutorCoroMap& waiting_co
         result = std::move(results);
         for (auto& [executor_ptr, coroutines] : waiting_coros)
         {
-            executor_ptr->schedule_all(coroutines.begin(), coroutines.end());
+            executor_ptr->schedule_all(coroutines);
             coroutines.clear();
         }
         waiting_coros.clear();
