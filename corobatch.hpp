@@ -1,5 +1,5 @@
-// Generated on Wed  8 Apr 15:15:03 BST 2020
-// Commit: 4d83b06070a48bf16e9091478c40edb81694b556
+// Generated on Thu  9 Apr 00:33:54 BST 2020
+// Commit: 64247a2892672140b53dd87234047f9dc75f8ceb
 
 //////////////////////////////////////////////////////////////////////
 // Start file: corobatch/logging.hpp
@@ -220,6 +220,7 @@ class Executor
 {
 public:
     Executor() = default;
+    // Optimization?: provide a hint on # of concurrent tasks, reserve the space in the queue
     Executor(const Executor&) = delete;
     Executor& operator=(const Executor&) = delete;
 
@@ -257,53 +258,70 @@ private:
     std::deque<std::experimental::coroutine_handle<>> d_ready_coroutines;
 };
 
+namespace private_ {
+
+template<typename F, typename... Args>
+concept Invokable = std::is_invocable_v<F, Args...>;
+
 template<typename T>
+struct FunctionCallbackType
+{
+    using type = std::function<void(T)>;
+};
+
+template<>
+struct FunctionCallbackType<void>
+{
+    using type = std::function<void()>;
+};
+
+} // namespace private_
+
+template<typename T, typename CallbackType = typename private_::FunctionCallbackType<T>::type>
 class task
 {
 private:
+    struct promise_callback_storage
+    {
+        void set_on_return_value_cb(CallbackType cb)
+        {
+            assert(not d_cb);
+            d_cb.emplace(std::move(cb));
+        }
+
+    protected:
+        std::optional<CallbackType> d_cb;
+    };
+
     template<typename Q>
-    struct promise_return
+    struct promise_return : promise_callback_storage
     {
         void return_value(Q val)
         {
             assert(this->d_cb);
-            this->d_cb(MY_FWD(val));
+            (*(this->d_cb))(MY_FWD(val));
         }
-
-        using OnReturnValueCb = std::function<void(T)>;
-        void set_on_return_value_cb(OnReturnValueCb cb)
-        {
-            assert(not d_cb);
-            d_cb = cb;
-        }
-
-    private:
-        OnReturnValueCb d_cb;
     };
 
     template<>
-    struct promise_return<void>
+    struct promise_return<void> : promise_callback_storage
     {
         void return_void()
         {
             assert(this->d_cb);
-            this->d_cb();
+            (*(this->d_cb))();
         }
-
-        using OnReturnValueCb = std::function<void()>;
-        void set_on_return_value_cb(OnReturnValueCb cb)
-        {
-            assert(not d_cb);
-            d_cb = cb;
-        }
-
-    private:
-        OnReturnValueCb d_cb;
     };
 
 public:
     struct promise_type : promise_return<T>
     {
+        // Optimization?: pass allocator to the task to allocate the promise
+        /*
+        void *operator new(size_t sz) { return allocator.alloc(sz); }
+        void operator delete(void *p, size_t sz) { allocator.free(p, sz); }
+        */
+
         task get_return_object() { return task{*this}; }
 
         std::experimental::suspend_always initial_suspend() { return {}; }
@@ -356,10 +374,10 @@ private:
     Handle d_handle;
 };
 
-template<typename OnDone, typename ReturnType>
-void submit(Executor& executor, OnDone&& onDone, task<ReturnType> taskObj)
+template<typename OnDone, typename ReturnType, typename Callback>
+void submit(Executor& executor, OnDone&& onDone, task<ReturnType, Callback> taskObj)
 {
-    typename task<ReturnType>::Handle coro_handle = std::move(taskObj).handle();
+    typename task<ReturnType, Callback>::Handle coro_handle = std::move(taskObj).handle();
     coro_handle.promise().set_on_return_value_cb(MY_FWD(onDone));
     coro_handle.promise().bind_executor(executor);
     coro_handle.resume();
@@ -367,7 +385,7 @@ void submit(Executor& executor, OnDone&& onDone, task<ReturnType> taskObj)
 
 inline constexpr auto sink = [](auto&&...) {};
 
-inline void submit(Executor& executor, task<void> task) { submit(executor, sink, std::move(task)); }
+void submit(Executor& executor, task<void> task) { submit(executor, sink, std::move(task)); }
 
 class IBatcher
 {
@@ -543,6 +561,7 @@ class BatcherBase<Accumulator, ArgTypeList<Args...>> : public IBatcher
 private:
     using NoRefAccumulator = std::remove_reference_t<Accumulator>;
 
+    // Optimization?: put the batch in some other ref counted storage, possibly in the batcher
     struct Batch : std::enable_shared_from_this<Batch>
     {
         Batch(Accumulator& accumulator)
@@ -567,6 +586,7 @@ private:
         const Accumulator& d_accumulator;
         typename NoRefAccumulator::AccumulationStorage d_storage;
         std::optional<typename NoRefAccumulator::ExecutedResults> d_result;
+        // Optimization?: find a better way to map back to the executors where to schedule the coroutine
         std::unordered_map<Executor*, std::vector<std::experimental::coroutine_handle<>>> d_waiting_coros;
     };
 
@@ -696,7 +716,6 @@ auto make_batchers(Accumulators&&... accumulators)
 #include <cassert>
 #include <condition_variable>
 #include <exception>
-#include <functional>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -741,13 +760,10 @@ namespace private_ {
 template<typename R, typename Arg, typename... OtherArgs>
 struct VectorAccumulatorTypedefs
 {
-    // Internal
-    using VectorType = std::vector<R>;
-
     // Public
     using StoredArgs = std::conditional_t<sizeof...(OtherArgs) == 0, Arg, std::tuple<Arg, OtherArgs...>>;
     using AccumulationStorage = std::vector<StoredArgs>;
-    using ExecutedResults = std::variant<VectorType, std::exception_ptr>;
+    using ExecutedResults = std::vector<R>;
     using Handle = std::size_t;
     using Args = ArgTypeList<Arg, OtherArgs...>;
     using ResultType = R;
@@ -788,37 +804,14 @@ public:
 
     bool must_execute(const AccumulationStorage&) const { return false; }
 
-    void execute(AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback) const
+    template<private_::Invokable<ExecutedResults> Callback>
+    void execute(AccumulationStorage&& storage, Callback callback) const
     {
-        // Asych implementation, schedule the function to be executed later
-        d_executor(
-            [&f = d_fun](AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback) mutable {
-                try
-                {
-                    f(std::move(storage), [callback](typename Base::VectorType r) {
-                        callback(ExecutedResults{std::in_place_index<0>, std::move(r)});
-                    });
-                }
-                catch (...)
-                {
-                    callback(ExecutedResults{std::in_place_index<1>, std::current_exception()});
-                }
-            },
-            std::move(storage),
-            std::move(callback));
+        // Async implementation, schedule the function to be executed later
+        d_executor(d_fun, std::move(storage), std::move(callback));
     }
 
-    ResultType get_result(Handle h, const ExecutedResults& r) const
-    {
-        if (r.index() == 0)
-        {
-            return std::get<0>(r)[h];
-        }
-        else
-        {
-            std::rethrow_exception(std::get<1>(r));
-        }
-    }
+    ResultType get_result(Handle h, const ExecutedResults& r) const { return r[h]; }
 
 private:
     Executor d_executor;
@@ -832,7 +825,7 @@ auto get_sync_fun_wrapper(F&& fun)
 {
     using VBTypedefs = private_::VectorAccumulatorTypedefs<R, Arg, OtherArgs...>;
     return [f = MY_FWD(fun)](typename VBTypedefs::AccumulationStorage&& storage,
-                             std::function<void(typename VBTypedefs::VectorType)> callback) {
+                             private_::Invokable<typename VBTypedefs::ExecutedResults> auto callback) {
         callback(f(std::move(storage)));
     };
 }
@@ -910,7 +903,8 @@ public:
                Base::must_execute(storage.second);
     }
 
-    void execute(AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback) const
+    template<private_::Invokable<ExecutedResults> Callback>
+    void execute(AccumulationStorage&& storage, Callback callback) const
     {
         Base::execute(std::move(storage).second, std::move(callback));
     }
@@ -977,7 +971,8 @@ public:
     {
     }
 
-    void execute(AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback) const
+    template<private_::Invokable<ExecutedResults> Callback>
+    void execute(AccumulationStorage&& storage, Callback callback) const
     {
         Base::execute(std::move(storage),
                       [cookie = d_waitState.executionStarted(), cb = std::move(callback), &waitState = d_waitState](
