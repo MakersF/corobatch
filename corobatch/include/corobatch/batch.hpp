@@ -382,7 +382,7 @@ private:
             assert(await_ready());
             decltype(auto) result = d_batch->d_accumulator.get_result(d_batcher_handle, d_batch->d_result.value());
             COROBATCH_LOG_DEBUG << "Resuming coro " << private_::PrintIfPossible(result);
-            return MY_FWD(result);
+            return result;
         }
 
         std::experimental::coroutine_handle<> await_suspend(std::experimental::coroutine_handle<> h)
