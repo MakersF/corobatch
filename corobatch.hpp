@@ -1,5 +1,5 @@
-// Generated on Wed  8 Apr 10:22:45 BST 2020
-// Commit: f58ffef5f5a79d9608fa90d987cfd035e617a7d0
+// Generated on Wed  8 Apr 15:15:03 BST 2020
+// Commit: 4d83b06070a48bf16e9091478c40edb81694b556
 
 //////////////////////////////////////////////////////////////////////
 // Start file: corobatch/logging.hpp
@@ -42,7 +42,6 @@ std::ostream* getLogStream(LogLevel);
 //////////////////////////////////////////////////////////////////////
 // End file: corobatch/logging.hpp
 //////////////////////////////////////////////////////////////////////
-
 
 //////////////////////////////////////////////////////////////////////
 // Start file: corobatch/private_/logging.cpp
@@ -99,7 +98,6 @@ std::ostream* getLogStream(LogLevel level) { return logger_cb(level); }
 //////////////////////////////////////////////////////////////////////
 // End file: corobatch/private_/logging.cpp
 //////////////////////////////////////////////////////////////////////
-
 
 //////////////////////////////////////////////////////////////////////
 // Start file: corobatch/private_/log.hpp
@@ -193,7 +191,6 @@ struct PrintIfPossible
 // End file: corobatch/private_/log.hpp
 //////////////////////////////////////////////////////////////////////
 
-
 //////////////////////////////////////////////////////////////////////
 // Start file: corobatch/batch.hpp
 //////////////////////////////////////////////////////////////////////
@@ -208,6 +205,7 @@ struct PrintIfPossible
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -238,10 +236,9 @@ public:
 
     ~Executor() { assert(d_ready_coroutines.empty()); }
 
-    template<typename It>
-    void schedule_all(It begin, It end)
+    void schedule_all(std::span<std::experimental::coroutine_handle<>> new_coros)
     {
-        d_ready_coroutines.insert(d_ready_coroutines.end(), begin, end);
+        d_ready_coroutines.insert(d_ready_coroutines.end(), new_coros.begin(), new_coros.end());
         COROBATCH_LOG_DEBUG << "Coroutines scheduled for execution";
     }
 
@@ -468,7 +465,7 @@ auto make_callback(std::shared_ptr<void> keep_alive, ExecutorCoroMap& waiting_co
         result = std::move(results);
         for (auto& [executor_ptr, coroutines] : waiting_coros)
         {
-            executor_ptr->schedule_all(coroutines.begin(), coroutines.end());
+            executor_ptr->schedule_all(coroutines);
             coroutines.clear();
         }
         waiting_coros.clear();
@@ -582,7 +579,7 @@ private:
             assert(await_ready());
             decltype(auto) result = d_batch->d_accumulator.get_result(d_batcher_handle, d_batch->d_result.value());
             COROBATCH_LOG_DEBUG << "Resuming coro " << private_::PrintIfPossible(result);
-            return MY_FWD(result);
+            return result;
         }
 
         std::experimental::coroutine_handle<> await_suspend(std::experimental::coroutine_handle<> h)
@@ -688,7 +685,6 @@ auto make_batchers(Accumulators&&... accumulators)
 //////////////////////////////////////////////////////////////////////
 // End file: corobatch/batch.hpp
 //////////////////////////////////////////////////////////////////////
-
 
 //////////////////////////////////////////////////////////////////////
 // Start file: corobatch/accumulate.hpp
@@ -1038,4 +1034,3 @@ private:
 //////////////////////////////////////////////////////////////////////
 // End file: corobatch/accumulate.hpp
 //////////////////////////////////////////////////////////////////////
-

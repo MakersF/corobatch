@@ -5,7 +5,8 @@
 #include <vector>
 
 #define COROBATCH_TRANSLATION_UNIT
-#include <corobatch/corobatch.hpp>
+//#include <corobatch/corobatch.hpp>
+#include "corobatch.hpp"
 
 int main()
 {
