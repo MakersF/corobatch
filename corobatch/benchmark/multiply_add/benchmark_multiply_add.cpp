@@ -100,7 +100,13 @@ BENCHMARK(BM_fma_loop)->Range(8, 8 << 10);
 static void BM_fma_corobatch(benchmark::State& state) {
     const auto& [as, bs, cs] = setup_data(state.range(0));
     for (auto _ : state) {
-        auto action = [](float a, float b, float c, auto&& fmadd) -> corobatch::task<float> {
+        float sum = 0;
+        auto onDone = [&sum](float result) {
+            // std::cout << "result = " << result << std::endl;
+            sum += result;
+        };
+
+        auto action = [](float a, float b, float c, auto&& fmadd) -> corobatch::task<float, decltype(onDone)> {
             float d = co_await fmadd(a, b, c);
             co_return d;
         };
@@ -108,14 +114,11 @@ static void BM_fma_corobatch(benchmark::State& state) {
         FusedMulAdd fmaddAccumulator;
         corobatch::Executor executor;
         auto fmadd = corobatch::Batcher<FusedMulAdd>(fmaddAccumulator);
-        float sum = 0;
         for (std::size_t i = 0; i < as.size(); i++)
         {
             corobatch::submit(
                 executor,
-                [&sum](float result) {
-                    sum += result;
-                },
+                onDone,
                 action(as[i], bs[i], cs[i], fmadd));
         }
 

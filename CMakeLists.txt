@@ -6,9 +6,9 @@
 #    There is no need to build boost. If you want change the code in the header to fix the issue above and
 #    build with concepts enabled
 # For benchmark, google benchmark is neeeded
-# 1. git clone https://github.com/google/benchmark. vendor/benchmark
+# 1. git clone https://github.com/google/benchmark vendor/benchmark
 # 2. cd vendor/benchmark && mkdir build && cd build
-# 3. cmake -DBENCHMARK_ENABLE_GTEST_TESTS=OFF -DCMAKE_CXX_COMPILER=/usr/bin/clang++-11 -DCMAKE_CXX_FLAGS="-pedantic -Wall -Wextra -std=gnu++2a -fcoroutines-ts -O3 -pthread -stdlib=libc++ -nostdinc++ -isystem/usr/lib/llvm-11/include/c++/v1/" -DCMAKE_CXX_LINK_FLAGS="-L/usr/lib/llvm-11/lib/ -lpthread -lc++ -Wl,-rpath,/usr/lib/llvm-11/lib/" ..
+# 3. cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBENCHMARK_ENABLE_GTEST_TESTS=OFF -DCMAKE_CXX_COMPILER=/usr/bin/clang++-11 -DCMAKE_CXX_FLAGS="-pedantic -Wall -Wextra -std=gnu++2a -fcoroutines-ts -O3 -pthread -stdlib=libc++ -nostdinc++ -isystem/usr/lib/llvm-11/include/c++/v1/" -DCMAKE_CXX_LINK_FLAGS="-L/usr/lib/llvm-11/lib/ -lpthread -lc++ -Wl,-rpath,/usr/lib/llvm-11/lib/" ..
 # 4. make
 cmake_minimum_required(VERSION 3.5)
 project ( COROBATCH CXX )

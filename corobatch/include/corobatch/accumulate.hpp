@@ -4,7 +4,6 @@
 #include <cassert>
 #include <condition_variable>
 #include <exception>
-#include <functional>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -49,13 +48,10 @@ namespace private_ {
 template<typename R, typename Arg, typename... OtherArgs>
 struct VectorAccumulatorTypedefs
 {
-    // Internal
-    using VectorType = std::vector<R>;
-
     // Public
     using StoredArgs = std::conditional_t<sizeof...(OtherArgs) == 0, Arg, std::tuple<Arg, OtherArgs...>>;
     using AccumulationStorage = std::vector<StoredArgs>;
-    using ExecutedResults = std::variant<VectorType, std::exception_ptr>;
+    using ExecutedResults = std::vector<R>;
     using Handle = std::size_t;
     using Args = ArgTypeList<Arg, OtherArgs...>;
     using ResultType = R;
@@ -96,36 +92,16 @@ public:
 
     bool must_execute(const AccumulationStorage&) const { return false; }
 
-    void execute(AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback) const
+    template<private_::Invokable<ExecutedResults> Callback>
+    void execute(AccumulationStorage&& storage, Callback callback) const
     {
-        // Asych implementation, schedule the function to be executed later
-        d_executor(
-            [&f = d_fun](AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback) mutable {
-                try
-                {
-                    f(std::move(storage), [callback](typename Base::VectorType r) {
-                        callback(ExecutedResults{std::in_place_index<0>, std::move(r)});
-                    });
-                }
-                catch (...)
-                {
-                    callback(ExecutedResults{std::in_place_index<1>, std::current_exception()});
-                }
-            },
-            std::move(storage),
-            std::move(callback));
+        // Async implementation, schedule the function to be executed later
+        d_executor(d_fun, std::move(storage), std::move(callback));
     }
 
     ResultType get_result(Handle h, const ExecutedResults& r) const
     {
-        if (r.index() == 0)
-        {
-            return std::get<0>(r)[h];
-        }
-        else
-        {
-            std::rethrow_exception(std::get<1>(r));
-        }
+        return r[h];
     }
 
 private:
@@ -140,7 +116,7 @@ auto get_sync_fun_wrapper(F&& fun)
 {
     using VBTypedefs = private_::VectorAccumulatorTypedefs<R, Arg, OtherArgs...>;
     return [f = MY_FWD(fun)](typename VBTypedefs::AccumulationStorage&& storage,
-                             std::function<void(typename VBTypedefs::VectorType)> callback) {
+                             private_::Invokable<typename VBTypedefs::ExecutedResults> auto callback) {
         callback(f(std::move(storage)));
     };
 }
@@ -218,7 +194,8 @@ public:
                Base::must_execute(storage.second);
     }
 
-    void execute(AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback) const
+    template<private_::Invokable<ExecutedResults> Callback>
+    void execute(AccumulationStorage&& storage, Callback callback) const
     {
         Base::execute(std::move(storage).second, std::move(callback));
     }
@@ -285,7 +262,8 @@ public:
     {
     }
 
-    void execute(AccumulationStorage&& storage, std::function<void(ExecutedResults)> callback) const
+    template<private_::Invokable<ExecutedResults> Callback>
+    void execute(AccumulationStorage&& storage, Callback callback) const
     {
         Base::execute(std::move(storage),
                       [cookie = d_waitState.executionStarted(), cb = std::move(callback), &waitState = d_waitState](

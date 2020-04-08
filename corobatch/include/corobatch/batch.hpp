@@ -23,6 +23,7 @@ class Executor
 {
 public:
     Executor() = default;
+    // Optimization?: provide a hint on # of concurrent tasks, reserve the space in the queue
     Executor(const Executor&) = delete;
     Executor& operator=(const Executor&) = delete;
 
@@ -60,53 +61,68 @@ private:
     std::deque<std::experimental::coroutine_handle<>> d_ready_coroutines;
 };
 
+namespace private_ {
+
+
+template<typename F, typename... Args>
+concept Invokable = std::is_invocable_v<F, Args...>;
+
 template<typename T>
+struct FunctionCallbackType {
+    using type = std::function<void(T)>;
+};
+
+template<>
+struct FunctionCallbackType<void> {
+    using type = std::function<void()>;
+};
+
+}
+
+template<typename T, typename CallbackType = typename private_::FunctionCallbackType<T>::type>
 class task
 {
 private:
+    struct promise_callback_storage {
+        void set_on_return_value_cb(CallbackType cb)
+        {
+            assert(not d_cb);
+            d_cb.emplace(std::move(cb));
+        }
+
+    protected:
+        std::optional<CallbackType> d_cb;
+    };
+
     template<typename Q>
-    struct promise_return
+    struct promise_return : promise_callback_storage
     {
         void return_value(Q val)
         {
             assert(this->d_cb);
-            this->d_cb(MY_FWD(val));
+            (*(this->d_cb))(MY_FWD(val));
         }
-
-        using OnReturnValueCb = std::function<void(T)>;
-        void set_on_return_value_cb(OnReturnValueCb cb)
-        {
-            assert(not d_cb);
-            d_cb = cb;
-        }
-
-    private:
-        OnReturnValueCb d_cb;
     };
 
     template<>
-    struct promise_return<void>
+    struct promise_return<void> : promise_callback_storage
     {
         void return_void()
         {
             assert(this->d_cb);
-            this->d_cb();
+            (*(this->d_cb))();
         }
-
-        using OnReturnValueCb = std::function<void()>;
-        void set_on_return_value_cb(OnReturnValueCb cb)
-        {
-            assert(not d_cb);
-            d_cb = cb;
-        }
-
-    private:
-        OnReturnValueCb d_cb;
     };
 
 public:
     struct promise_type : promise_return<T>
     {
+        // Optimization?: pass allocator to the task to allocate the promise
+        /*
+        void *operator new(size_t sz) { return allocator.alloc(sz); }
+        void operator delete(void *p, size_t sz) { allocator.free(p, sz); }
+        */
+
         task get_return_object() { return task{*this}; }
 
         std::experimental::suspend_always initial_suspend() { return {}; }
@@ -159,10 +175,10 @@ private:
     Handle d_handle;
 };
 
-template<typename OnDone, typename ReturnType>
-void submit(Executor& executor, OnDone&& onDone, task<ReturnType> taskObj)
+template<typename OnDone, typename ReturnType, typename Callback>
+void submit(Executor& executor, OnDone&& onDone, task<ReturnType, Callback> taskObj)
 {
-    typename task<ReturnType>::Handle coro_handle = std::move(taskObj).handle();
+    typename task<ReturnType, Callback>::Handle coro_handle = std::move(taskObj).handle();
     coro_handle.promise().set_on_return_value_cb(MY_FWD(onDone));
     coro_handle.promise().bind_executor(executor);
     coro_handle.resume();
@@ -170,7 +186,7 @@ void submit(Executor& executor, OnDone&& onDone, task<ReturnType> taskObj)
 
 inline constexpr auto sink = [](auto&&...) {};
 
-inline void submit(Executor& executor, task<void> task) { submit(executor, sink, std::move(task)); }
+void submit(Executor& executor, task<void> task) { submit(executor, sink, std::move(task)); }
 
 class IBatcher
 {
@@ -346,6 +362,7 @@ class BatcherBase<Accumulator, ArgTypeList<Args...>> : public IBatcher
 private:
     using NoRefAccumulator = std::remove_reference_t<Accumulator>;
 
+    // Optimization?: put the batch in some other ref counted storage, possibly in the batcher
     struct Batch : std::enable_shared_from_this<Batch>
     {
         Batch(Accumulator& accumulator)
@@ -370,6 +387,7 @@ private:
         const Accumulator& d_accumulator;
         typename NoRefAccumulator::AccumulationStorage d_storage;
         std::optional<typename NoRefAccumulator::ExecutedResults> d_result;
+        // Optimization?: find a better way to map back to the executors where to schedule the coroutine
         std::unordered_map<Executor*, std::vector<std::experimental::coroutine_handle<>>> d_waiting_coros;
     };
 
