@@ -22,9 +22,9 @@
              COROBATCH_STREAM_NAME != nullptr && (COROBATCH_PRINT_LOGLINE_PREFIX(*COROBATCH_STREAM_NAME), true); \
              COROBATCH_STREAM_NAME = (*(COROBATCH_STREAM_NAME) << '\n', nullptr))
 #else
-#define COROBATCH_LOG_BLOCK(level, levelname)         \
-    for (const char* COROBATCH_LOGLEVEL_NAME; false;) \
-        for (::std::ostream * COROBATCH_STREAM_NAME; false;)
+#define COROBATCH_LOG_BLOCK(level, levelname)                                                                       \
+    for (const char* COROBATCH_LOGLEVEL_NAME = nullptr; COROBATCH_LOGLEVEL_NAME; COROBATCH_LOGLEVEL_NAME = nullptr) \
+        for (::std::ostream* COROBATCH_STREAM_NAME = nullptr; COROBATCH_STREAM_NAME; COROBATCH_STREAM_NAME = nullptr)
 #endif
 
 #define COROBATCH_LOG_STREAM (*(COROBATCH_STREAM_NAME))

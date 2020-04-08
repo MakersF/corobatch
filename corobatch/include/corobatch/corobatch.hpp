@@ -5,5 +5,6 @@
 #include <corobatch/batch.hpp>
 #include <corobatch/logging.hpp>
 #include <corobatch/private_/log.hpp>
+#include <corobatch/translation_unit.cpp>
 
 #endif

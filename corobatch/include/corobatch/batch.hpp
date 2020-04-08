@@ -264,6 +264,7 @@ auto make_callback(std::shared_ptr<void> keep_alive, ExecutorCoroMap& waiting_co
 {
     return [keep_alive = std::move(keep_alive), &waiting_coros, &result](ResultType results) mutable {
         assert(not waiting_coros.empty() && "Did you call the callback twice?");
+        COROBATCH_LOG_DEBUG << "Batch execution completed with result = " << PrintIfPossible(results);
         result = std::move(results);
         for (auto& [executor_ptr, coroutines] : waiting_coros)
         {
@@ -271,7 +272,6 @@ auto make_callback(std::shared_ptr<void> keep_alive, ExecutorCoroMap& waiting_co
             coroutines.clear();
         }
         waiting_coros.clear();
-        COROBATCH_LOG_DEBUG << "Batch execution completed";
     };
 }
 
@@ -385,11 +385,19 @@ private:
             return MY_FWD(result);
         }
 
-        auto await_suspend(std::experimental::coroutine_handle<> h)
+        std::experimental::coroutine_handle<> await_suspend(std::experimental::coroutine_handle<> h)
         {
             d_batch->d_waiting_coros[std::addressof(d_executor)].push_back(h);
             std::optional<std::experimental::coroutine_handle<>> next_coro = d_executor.pop_next_coro();
-            return next_coro ? next_coro.value() : std::experimental::noop_coroutine();
+            if (next_coro)
+            {
+                COROBATCH_LOG_DEBUG << "Passing control to next coroutine";
+                return next_coro.value();
+            }
+            else
+            {
+                return std::experimental::noop_coroutine();
+            }
         }
 
         // private:

@@ -30,8 +30,4 @@ std::ostream* getLogStream(LogLevel);
 
 } // namespace corobatch
 
-#ifdef COROBATCH_TRANSLATION_UNIT
-#include <corobatch/private_/logging.cpp>
-#endif
-
 #endif

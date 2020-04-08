@@ -1,7 +1,11 @@
+#ifndef COROBATCH_PRIVATE_LOGGING_CPP
+#define COROBATCH_PRIVATE_LOGGING_CPP
+
+#ifdef COROBATCH_TRANSLATION_UNIT
+
 #include <iostream>
 
 #include <corobatch/logging.hpp>
-#include <corobatch/private_/log.hpp>
 
 namespace corobatch {
 
@@ -38,3 +42,6 @@ std::ostream* getLogStream(LogLevel level) { return logger_cb(level); }
 } // namespace private_
 
 } // namespace corobatch
+
+#endif
+#endif
