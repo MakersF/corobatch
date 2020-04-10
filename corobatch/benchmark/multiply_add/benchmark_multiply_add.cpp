@@ -82,7 +82,8 @@ static auto setup_data(std::size_t size)
     return std::make_tuple(as, bs, cs);
 }
 
-float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& bs, const std::vector<float>& cs) {
+float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& bs, const std::vector<float>& cs)
+{
     float sum = 0;
     auto onDone = [&sum](float result) {
         // std::cout << "result = " << result << std::endl;

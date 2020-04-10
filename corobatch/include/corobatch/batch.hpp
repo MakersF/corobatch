@@ -476,9 +476,7 @@ private:
     Accumulator d_accumulator;
     std::shared_ptr<Batch> d_current_batch;
 
-    std::shared_ptr<Batch> make_new_batch() {
-        return std::make_shared<Batch>(d_accumulator);
-    }
+    std::shared_ptr<Batch> make_new_batch() { return std::make_shared<Batch>(d_accumulator); }
 };
 
 } // namespace private_

@@ -1,5 +1,5 @@
-// Generated on Thu  9 Apr 00:33:54 BST 2020
-// Commit: 64247a2892672140b53dd87234047f9dc75f8ceb
+// Generated on Fri 10 Apr 15:33:01 BST 2020
+// Commit: b178108ab38bba6dd0323ab129301511637fe6d0
 
 //////////////////////////////////////////////////////////////////////
 // Start file: corobatch/logging.hpp
@@ -168,10 +168,10 @@ struct PrintIfPossible
             const char* begin = reinterpret_cast<const char*>(&obj.d_value);
             const char* end = begin + sizeof(obj.d_value);
             std::ios_base::fmtflags previous_flags = os.flags();
-            os << "[ ";
+            os << "[";
             for (; begin != end; begin++)
             {
-                os << std::showbase << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(*begin);
+                os << " " << std::showbase << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(*begin);
             }
             os << " ]";
             os.flags(previous_flags);
@@ -673,7 +673,7 @@ private:
     Accumulator d_accumulator;
     std::shared_ptr<Batch> d_current_batch;
 
-    std::shared_ptr<Batch> make_new_batch() { return std::shared_ptr<Batch>(new Batch(d_accumulator)); }
+    std::shared_ptr<Batch> make_new_batch() { return std::make_shared<Batch>(d_accumulator); }
 };
 
 } // namespace private_
