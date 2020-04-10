@@ -12,12 +12,143 @@
 #include <tuple>
 #include <unordered_map>
 #include <vector>
+#include <cstdlib>
 
 #include <corobatch/logging.hpp>
 #include <corobatch/private_/log.hpp>
 
 #define MY_FWD(...) ::std::forward<decltype(__VA_ARGS__)>(__VA_ARGS__)
 namespace corobatch {
+
+
+// Simple bump allocator.
+/*
+*/
+struct bumpalloc {
+  static constexpr std::size_t  buffer_size= 1024*1024*8;
+  char buffer[buffer_size];
+  std::size_t base = 0;
+  std::size_t alloc_count = 0;
+  std::size_t max_total = 0;
+  std::size_t max_count = 0;
+
+  void *alloc(size_t sz) {
+    COROBATCH_LOG_INFO << "alloc!";
+    if (base + sz >= buffer_size) {
+        COROBATCH_LOG_ERROR << "Exhausted the memory";
+        std::terminate();
+    }
+    void* ptr = buffer + base;
+    base += sz;
+    alloc_count++;
+    max_total = std::max(max_total, base);
+    max_count = std::max(max_count, alloc_count);
+    return ptr;
+  }
+
+  void free(void *, size_t ) {
+    COROBATCH_LOG_INFO << "free!";
+    alloc_count--;
+    if(alloc_count == 0) {
+        base = 0;
+    }
+  }
+
+  ~bumpalloc() {
+    COROBATCH_LOG_DEBUG << "allocs " << max_count << " total " << max_total;
+  }
+};
+
+inline bumpalloc allocator;
+
+struct poolalloc {
+  struct header {
+    header *next;
+    size_t size;
+  };
+
+  header *root = nullptr;
+  size_t total = 0;
+  size_t alloc_count = 0;
+
+  poolalloc() = default;
+  // Copy constructor required I don't know why. Make it the same as default construction just to unblock
+  poolalloc(const poolalloc&) : poolalloc() {}
+
+  poolalloc(poolalloc&& other) : root(other.root), total(other.total), alloc_count(other.alloc_count) {
+    other.root = nullptr;
+    other.total = 0;
+    other.alloc_count = 0;
+  }
+
+  ~poolalloc() {
+    auto current = root;
+    while (current) {
+      auto next = current->next;
+      std::free(current);
+      current = next;
+    }
+    COROBATCH_LOG_DEBUG << "allocs " << alloc_count << " total " << total;
+  }
+
+  void *alloc(size_t align, size_t sz) {
+    COROBATCH_LOG_INFO << "alloc!";
+    assert(sz >= sizeof(header));
+    if (root && root->size >= sz) {
+      header *mem = root;
+      root = root->next;
+      mem->~header();
+      return static_cast<void*>(mem);
+    }
+    ++alloc_count;
+    total += sz;
+
+    return std::aligned_alloc(align, sz);
+  }
+
+  void free(void *p, size_t sz) {
+    COROBATCH_LOG_INFO << "free!";
+    assert(sz >= sizeof(header));
+    auto new_entry = new (p) header;
+    new_entry->size = sz;
+    new_entry->next = root;
+    root = new_entry;
+  }
+
+  template<typename T>
+  struct Allocator {
+    using value_type = T;
+
+    Allocator(poolalloc* pa) : d_poolalloc(pa) {}
+
+    template<typename Q>
+    Allocator(const Allocator<Q>& o) : d_poolalloc(o.d_poolalloc) {}
+
+    template<typename Q>
+    struct rebind {
+        using other = Allocator<Q>;
+    };
+
+    T* allocate(std::size_t num) {
+        return static_cast<T*>(d_poolalloc->alloc(alignof(T), sizeof(T) * num));
+    }
+
+    void deallocate(T* ptr, std::size_t num) {
+        d_poolalloc->free(static_cast<void*>(ptr), sizeof(T) * num);
+    }
+
+    bool operator==(const Allocator& other) {
+        return d_poolalloc == other.d_poolalloc;
+    }
+
+    poolalloc* d_poolalloc;
+  };
+
+  template<typename T>
+  Allocator<T> allocator() {
+      return {this};
+  }
+};
 
 class Executor
 {
@@ -121,9 +252,12 @@ public:
     {
         // Optimization?: pass allocator to the task to allocate the promise
         /*
-        void *operator new(size_t sz) { return allocator.alloc(sz); }
-        void operator delete(void *p, size_t sz) { allocator.free(p, sz); }
         */
+        void *operator new(size_t sz) {
+            return allocator.alloc(sz);
+        }
+        void operator delete(void *p, size_t sz) {
+            allocator.free(p, sz); }
 
         task get_return_object() { return task{*this}; }
 
@@ -278,24 +412,22 @@ auto accumulator_record_arguments(const Accumulator& ac, AccumulationStorage& as
 using ExecutorCoroMap = std::unordered_map<Executor*, std::vector<std::experimental::coroutine_handle<>>>;
 
 template<typename ResultType>
-auto make_callback(std::shared_ptr<void> keep_alive, ExecutorCoroMap& waiting_coros, std::optional<ResultType>& result)
+auto make_callback(std::shared_ptr<void> keep_alive, Executor* executor_ptr, std::vector<std::experimental::coroutine_handle<>>& waiting_coros, std::optional<ResultType>& result)
 {
-    return [keep_alive = std::move(keep_alive), &waiting_coros, &result](ResultType results) mutable {
+    return [keep_alive = std::move(keep_alive), executor_ptr, &waiting_coros, &result](ResultType results) mutable {
+        assert(executor_ptr);
         assert(not waiting_coros.empty() && "Did you call the callback twice?");
         COROBATCH_LOG_DEBUG << "Batch execution completed with result = " << PrintIfPossible(results);
         result = std::move(results);
-        for (auto& [executor_ptr, coroutines] : waiting_coros)
-        {
-            executor_ptr->schedule_all(coroutines);
-            coroutines.clear();
-        }
+        executor_ptr->schedule_all(waiting_coros);
         waiting_coros.clear();
     };
 }
 
 template<typename ResultType>
 using CallbackType = decltype(make_callback(std::declval<std::shared_ptr<void*>>(),
-                                            std::declval<ExecutorCoroMap&>(),
+                                            std::declval<Executor*>(),
+                                            std::declval<std::vector<std::experimental::coroutine_handle<>>&>(),
                                             std::declval<std::optional<ResultType>&>()));
 
 } // namespace private_
@@ -371,6 +503,7 @@ private:
         : d_accumulator(accumulator), d_storage(d_accumulator.get_accumulation_storage())
         {
             COROBATCH_LOG_DEBUG << "New batch created";
+            d_waiting_coros.reserve(10);
         }
         ~Batch() { assert(d_waiting_coros.empty()); }
 
@@ -383,16 +516,18 @@ private:
             // This allows to have the callback type be dependent only on the result type
             auto keep_alive = std::shared_ptr<void>(this->shared_from_this(), nullptr);
             d_accumulator.execute(std::move(d_storage),
-                                  make_callback(std::move(keep_alive), d_waiting_coros, d_result));
+                                  make_callback(std::move(keep_alive), d_executor, d_waiting_coros, d_result));
         }
 
         const Accumulator& d_accumulator;
         typename NoRefAccumulator::AccumulationStorage d_storage;
         std::optional<typename NoRefAccumulator::ExecutedResults> d_result;
         // Optimization?: find a better way to map back to the executors where to schedule the coroutine
-        std::unordered_map<Executor*, std::vector<std::experimental::coroutine_handle<>>> d_waiting_coros;
+        Executor* d_executor;
+        std::vector<std::experimental::coroutine_handle<>> d_waiting_coros;
     };
 
+private:
     struct Awaitable
     {
         bool await_ready() { return d_batch->d_result.has_value(); }
@@ -407,7 +542,9 @@ private:
 
         std::experimental::coroutine_handle<> await_suspend(std::experimental::coroutine_handle<> h)
         {
-            d_batch->d_waiting_coros[std::addressof(d_executor)].push_back(h);
+            assert(d_batch->d_executor == 0 or d_batch->d_executor == &d_executor);
+            d_batch->d_executor = &d_executor;
+            d_batch->d_waiting_coros.push_back(h);
             std::optional<std::experimental::coroutine_handle<>> next_coro = d_executor.pop_next_coro();
             if (next_coro)
             {
@@ -473,11 +610,18 @@ public:
     }
 
 private:
+    poolalloc d_shared_ptr_pool_alloc;
     Accumulator d_accumulator;
     std::shared_ptr<Batch> d_current_batch;
 
     std::shared_ptr<Batch> make_new_batch() {
         return std::make_shared<Batch>(d_accumulator);
+        std::allocate_shared<Batch>(
+            /*std::allocator<Batch>()*/
+            /*
+            */
+            d_shared_ptr_pool_alloc.allocator<Batch>()
+            , d_accumulator);
     }
 };
 

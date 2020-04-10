@@ -82,6 +82,7 @@ static auto setup_data(std::size_t size)
     return std::make_tuple(as, bs, cs);
 }
 
+
 float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& bs, const std::vector<float>& cs) {
     float sum = 0;
     auto onDone = [&sum](float result) {
@@ -107,6 +108,12 @@ float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& 
     return sum;
 }
 
+// #define COROBATCH_BENCHMARK
+
+#ifdef COROBATCH_BENCHMARK
+
+/*
+*/
 static void BM_fma_loop(benchmark::State& state)
 {
     const auto& [as, bs, cs] = setup_data(static_cast<std::size_t>(state.range(0)));
@@ -124,6 +131,9 @@ static void BM_fma_loop(benchmark::State& state)
 // Register the function as a benchmark
 BENCHMARK(BM_fma_loop)->Range(8, 8 << 10);
 
+
+/*
+*/
 // Define another benchmark
 static void BM_fma_corobatch(benchmark::State& state)
 {
@@ -138,3 +148,26 @@ static void BM_fma_corobatch(benchmark::State& state)
 BENCHMARK(BM_fma_corobatch)->Range(8, 8 << 10);
 
 BENCHMARK_MAIN();
+
+#else
+
+int main(int argc, char** argv) {
+    int rounds = 10;
+    int size = 4096;
+
+    if (argc >= 2) {
+        rounds = std::atoi(argv[1]);
+    }
+
+    if (argc == 3) {
+        size = std::atoi(argv[2]);
+    }
+
+    for(int i = 0; i < rounds; i++) {
+        const auto& [as, bs, cs] = setup_data(size);
+        float sum = fma_corobatch_sum(as, bs, cs);
+        benchmark::DoNotOptimize(sum);
+        benchmark::ClobberMemory();
+    }
+}
+#endif
