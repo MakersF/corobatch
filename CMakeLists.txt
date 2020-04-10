@@ -15,13 +15,16 @@ project ( COROBATCH CXX )
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_compile_options(-pedantic -Wall -Wextra -std=gnu++2a -fcoroutines-ts -pthread -nostdinc++ -isystem/usr/lib/llvm-11/include/c++/v1/)
-SET(CMAKE_CXX_LINK_FLAGS "${CMAKE_CXX_LINK_FLAGS} -L/usr/lib/llvm-11/lib/ -lpthread -lc++ -Wl,-rpath,/usr/lib/llvm-11/lib/")
-
-add_compile_options( -mfma -O3 -g )
-# add_compile_options(-g -O0 )
+SET(CMAKE_CXX_LINK_FLAGS "${CMAKE_CXX_LINK_FLAGS} -L/usr/lib/llvm-11/lib/")
 
 # add_compile_options( -fsanitize=address )
 # SET(CMAKE_CXX_LINK_FLAGS "${CMAKE_CXX_LINK_FLAGS} -lasan")
+
+SET(CMAKE_CXX_LINK_FLAGS "${CMAKE_CXX_LINK_FLAGS} -lpthread -lc++ -Wl,-rpath,/usr/lib/llvm-11/lib/")
+
+add_compile_options( -O3 -g )
+# add_compile_options(-g -O0 )
+
 
 # add_compile_options( -flto )
 # SET(CMAKE_CXX_LINK_FLAGS "${CMAKE_CXX_LINK_FLAGS} -flto -fuse-ld=lld-11")

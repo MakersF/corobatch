@@ -63,10 +63,10 @@ struct PrintIfPossible
             const char* begin = reinterpret_cast<const char*>(&obj.d_value);
             const char* end = begin + sizeof(obj.d_value);
             std::ios_base::fmtflags previous_flags = os.flags();
-            os << "[ ";
+            os << "[";
             for (; begin != end; begin++)
             {
-                os << std::showbase << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(*begin);
+                os << " " << std::showbase << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(*begin);
             }
             os << " ]";
             os.flags(previous_flags);

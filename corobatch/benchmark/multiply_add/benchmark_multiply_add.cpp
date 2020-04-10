@@ -82,6 +82,31 @@ static auto setup_data(std::size_t size)
     return std::make_tuple(as, bs, cs);
 }
 
+float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& bs, const std::vector<float>& cs) {
+    float sum = 0;
+    auto onDone = [&sum](float result) {
+        // std::cout << "result = " << result << std::endl;
+        sum += result;
+    };
+
+    auto action = [](float a, float b, float c, auto&& fmadd) -> corobatch::task<float, decltype(onDone)> {
+        float d = co_await fmadd(a, b, c);
+        co_return d;
+    };
+
+    FusedMulAdd fmaddAccumulator;
+    corobatch::Executor executor;
+    auto fmadd = corobatch::Batcher<FusedMulAdd>(fmaddAccumulator);
+    for (std::size_t i = 0; i < as.size(); i++)
+    {
+        corobatch::submit(executor, onDone, action(as[i], bs[i], cs[i], fmadd));
+    }
+
+    corobatch::force_execution(fmadd);
+    executor.run();
+    return sum;
+}
+
 static void BM_fma_loop(benchmark::State& state)
 {
     const auto& [as, bs, cs] = setup_data(static_cast<std::size_t>(state.range(0)));
@@ -105,27 +130,7 @@ static void BM_fma_corobatch(benchmark::State& state)
     const auto& [as, bs, cs] = setup_data(state.range(0));
     for (auto _ : state)
     {
-        float sum = 0;
-        auto onDone = [&sum](float result) {
-            // std::cout << "result = " << result << std::endl;
-            sum += result;
-        };
-
-        auto action = [](float a, float b, float c, auto&& fmadd) -> corobatch::task<float, decltype(onDone)> {
-            float d = co_await fmadd(a, b, c);
-            co_return d;
-        };
-
-        FusedMulAdd fmaddAccumulator;
-        corobatch::Executor executor;
-        auto fmadd = corobatch::Batcher<FusedMulAdd>(fmaddAccumulator);
-        for (std::size_t i = 0; i < as.size(); i++)
-        {
-            corobatch::submit(executor, onDone, action(as[i], bs[i], cs[i], fmadd));
-        }
-
-        corobatch::force_execution(fmadd);
-        executor.run();
+        float sum = fma_corobatch_sum(as, bs, cs);
         benchmark::DoNotOptimize(sum);
         benchmark::ClobberMemory();
     }
