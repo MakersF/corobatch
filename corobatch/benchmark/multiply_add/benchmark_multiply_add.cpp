@@ -90,7 +90,8 @@ float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& 
         sum += result;
     };
 
-    auto action = [](float a, float b, float c, auto&& fmadd) -> corobatch::task<float, decltype(onDone)> {
+    using task = corobatch::task_type<>::with_return<float>::with_callback<decltype(onDone)>::task;
+    auto action = [](float a, float b, float c, auto&& fmadd) -> task {
         float d = co_await fmadd(a, b, c);
         co_return d;
     };

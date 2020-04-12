@@ -67,63 +67,74 @@ template<typename F, typename... Args>
 concept Invokable = std::is_invocable_v<F, Args...>;
 
 template<typename T>
-struct FunctionCallbackType
+struct FunctionCallback
 {
     using type = std::function<void(T)>;
 };
 
 template<>
-struct FunctionCallbackType<void>
+struct FunctionCallback<void>
 {
     using type = std::function<void()>;
 };
 
+template<typename Callback>
+struct promise_callback_storage
+{
+    void set_on_return_value_cb(Callback cb)
+    {
+        assert(not d_cb);
+        d_cb.emplace(std::move(cb));
+    }
+
+protected:
+    std::optional<Callback> d_cb;
+};
+
+template<typename Q, typename Callback>
+struct promise_return : promise_callback_storage<Callback>
+{
+    void return_value(Q val)
+    {
+        assert(this->d_cb);
+        (*(this->d_cb))(MY_FWD(val));
+    }
+};
+
+template<typename Callback>
+struct promise_return<void, Callback> : promise_callback_storage<Callback>
+{
+    void return_void()
+    {
+        assert(this->d_cb);
+        (*(this->d_cb))();
+    }
+};
+
 } // namespace private_
 
-template<typename T, typename CallbackType = typename private_::FunctionCallbackType<T>::type>
+template<typename T,
+         typename Callback = typename private_::FunctionCallback<T>::type,
+         typename Allocator = std::allocator<void>>
 class task
 {
-private:
-    struct promise_callback_storage
-    {
-        void set_on_return_value_cb(CallbackType cb)
-        {
-            assert(not d_cb);
-            d_cb.emplace(std::move(cb));
-        }
-
-    protected:
-        std::optional<CallbackType> d_cb;
-    };
-
-    template<typename Q>
-    struct promise_return : promise_callback_storage
-    {
-        void return_value(Q val)
-        {
-            assert(this->d_cb);
-            (*(this->d_cb))(MY_FWD(val));
-        }
-    };
-
-    template<>
-    struct promise_return<void> : promise_callback_storage
-    {
-        void return_void()
-        {
-            assert(this->d_cb);
-            (*(this->d_cb))();
-        }
-    };
-
 public:
-    struct promise_type : promise_return<T>
+    struct promise_type : private_::promise_return<T, Callback>
     {
-        // Optimization?: pass allocator to the task to allocate the promise
-        /*
-        void *operator new(size_t sz) { return allocator.alloc(sz); }
-        void operator delete(void *p, size_t sz) { allocator.free(p, sz); }
-        */
+    private:
+        using PromiseAllocator = typename std::allocator_traits<Allocator>::template rebind_alloc<promise_type>;
+        static inline PromiseAllocator allocator;
+
+    public:
+        static void* operator new(size_t sz)
+        {
+            return std::allocator_traits<PromiseAllocator>::allocate(allocator, sz);
+        }
+
+        static void operator delete(void* p, size_t sz)
+        {
+            std::allocator_traits<PromiseAllocator>::deallocate(allocator, static_cast<promise_type*>(p), sz);
+        }
 
         task get_return_object() { return task{*this}; }
 
@@ -148,18 +159,6 @@ public:
         Executor* d_executor = nullptr;
     };
 
-private:
-public:
-    using Handle = std::experimental::coroutine_handle<promise_type>;
-    using ReturnType = T;
-
-    Handle handle() &&
-    {
-        Handle other = d_handle;
-        d_handle = nullptr;
-        return other;
-    }
-
     task(const task&) = delete;
     task(task&& other) : d_handle(other.d_handle) { other.d_handle = nullptr; }
 
@@ -172,23 +171,52 @@ public:
     }
 
 private:
+    using Handle = std::experimental::coroutine_handle<promise_type>;
+
+    Handle handle() &&
+    {
+        Handle other = d_handle;
+        d_handle = nullptr;
+        return other;
+    }
+
+    template<typename OnDone, typename R, typename C, typename A>
+    friend void submit(Executor&, OnDone&&, task<R, C, A>);
+
     explicit task(promise_type& promise) : d_handle(Handle::from_promise(promise)) {}
 
     Handle d_handle;
 };
 
-template<typename OnDone, typename ReturnType, typename Callback>
-void submit(Executor& executor, OnDone&& onDone, task<ReturnType, Callback> taskObj)
+template<typename OnDone, typename ReturnType, typename Callback, typename Allocator>
+void submit(Executor& executor, OnDone&& onDone, task<ReturnType, Callback, Allocator> taskObj)
 {
-    typename task<ReturnType, Callback>::Handle coro_handle = std::move(taskObj).handle();
+    typename task<ReturnType, Callback, Allocator>::Handle coro_handle = std::move(taskObj).handle();
     coro_handle.promise().set_on_return_value_cb(MY_FWD(onDone));
     coro_handle.promise().bind_executor(executor);
     coro_handle.resume();
 }
 
-inline constexpr auto sink = [](auto&&...) {};
+template<typename T = void,
+         typename Callback_ = typename private_::FunctionCallback<T>::type,
+         typename Allocator_ = std::allocator<void>>
+struct task_type
+{
+    using ReturnType = T;
+    using Callback = Callback_;
+    using Allocator = Allocator_;
 
-void submit(Executor& executor, task<void> task) { submit(executor, sink, std::move(task)); }
+    template<typename NewT>
+    using with_return = task_type<NewT, Callback, Allocator>;
+
+    template<typename NewAllocator>
+    using with_alloc = task_type<T, Callback, NewAllocator>;
+
+    template<typename NewCallback>
+    using with_callback = task_type<T, NewCallback, Allocator>;
+
+    using task = task<ReturnType, Callback, Allocator>;
+};
 
 class IBatcher
 {
