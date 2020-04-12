@@ -82,6 +82,68 @@ static auto setup_data(std::size_t size)
     return std::make_tuple(as, bs, cs);
 }
 
+struct bumpalloc
+{
+    bumpalloc() = default;
+    bumpalloc(const bumpalloc&) = delete;
+
+    static constexpr std::size_t buffer_size = 1024 * 1024 * 20;
+    char buffer[buffer_size];
+    std::size_t base = 0;
+    std::size_t alloc_count = 0;
+    std::size_t max_total = 0;
+    std::size_t max_count = 0;
+
+    void* allocate(std::size_t align, std::size_t sz)
+    {
+        COROBATCH_LOG_DEBUG << "Allocating " << sz << " alignment: " << align << " with base: " << base;
+        std::size_t size_left = buffer_size - base;
+        void* ptr = buffer + base;
+        if (std::align(align, sz, ptr, size_left) == nullptr)
+        {
+            printf("Exhausted the memory");
+            std::terminate();
+        }
+        base = buffer_size - size_left + sz;
+        alloc_count++;
+        max_total = std::max(max_total, base);
+        max_count = std::max(max_count, alloc_count);
+        return ptr;
+    }
+
+    void deallocate(void*, size_t sz)
+    {
+        COROBATCH_LOG_INFO << "Deallocating " << sz;
+        alloc_count--;
+        if (alloc_count == 0)
+        {
+            base = 0;
+        }
+    }
+
+    ~bumpalloc() { COROBATCH_LOG_DEBUG << "allocs " << max_count << " total " << max_total; }
+};
+
+static bumpalloc globalbumpalloc;
+
+template<typename T>
+struct GlobalBumpAllocator
+{
+    using value_type = T;
+
+    template<typename Q>
+    struct rebind
+    {
+        using other = GlobalBumpAllocator<Q>;
+    };
+
+    T* allocate(std::size_t num) { return static_cast<T*>(globalbumpalloc.allocate(alignof(T), sizeof(T) * num)); }
+
+    void deallocate(T* ptr, std::size_t num) { globalbumpalloc.deallocate(static_cast<void*>(ptr), sizeof(T) * num); }
+
+    bool operator==(const GlobalBumpAllocator&) { return true; }
+};
+
 float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& bs, const std::vector<float>& cs)
 {
     float sum = 0;
@@ -90,7 +152,8 @@ float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& 
         sum += result;
     };
 
-    using task = corobatch::task_type<>::with_return<float>::with_callback<decltype(onDone)>::task;
+    using task = corobatch::task_type<>::with_return<float>::with_callback<decltype(
+        onDone)>::with_alloc<GlobalBumpAllocator<void>>::task;
     auto action = [](float a, float b, float c, auto&& fmadd) -> task {
         float d = co_await fmadd(a, b, c);
         co_return d;
