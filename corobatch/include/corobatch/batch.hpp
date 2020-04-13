@@ -197,23 +197,20 @@ void submit(Executor& executor, OnDone&& onDone, task<ReturnType, Callback, Allo
     coro_handle.resume();
 }
 
-template<typename T = void,
+template<typename T,
          typename Callback_ = typename private_::FunctionCallback<T>::type,
          typename Allocator_ = std::allocator<void>>
-struct task_type
+struct task_param
 {
     using ReturnType = T;
     using Callback = Callback_;
     using Allocator = Allocator_;
 
-    template<typename NewT>
-    using with_return = task_type<NewT, Callback, Allocator>;
-
     template<typename NewAllocator>
-    using with_alloc = task_type<T, Callback, NewAllocator>;
+    using with_alloc = task_param<T, Callback, NewAllocator>;
 
     template<typename NewCallback>
-    using with_callback = task_type<T, NewCallback, Allocator>;
+    using with_callback = task_param<T, NewCallback, Allocator>;
 
     using task = task<ReturnType, Callback, Allocator>;
 };
@@ -278,18 +275,21 @@ struct ArgTypeList
 
 namespace private_ {
 
-template<typename... T>
-struct is_argtypelist : std::false_type
+template<template<class...> class T, class I>
+struct is_templ_instance : std::false_type
 {
 };
 
-template<typename... T>
-struct is_argtypelist<ArgTypeList<T...>> : std::true_type
+template<template<class...> class T, class... A>
+struct is_templ_instance<T, T<A...>> : std::true_type
 {
 };
+
+template<template<class...> class T, class I>
+constexpr bool is_templ_instance_v = is_templ_instance<T, I>::value;
 
 template<typename T>
-concept ConceptArgTypeList = is_argtypelist<T>::value;
+concept ConceptArgTypeList = is_templ_instance_v<ArgTypeList, T>;
 
 template<typename T, typename U>
 // 1. Use the standard library one once it's addded.

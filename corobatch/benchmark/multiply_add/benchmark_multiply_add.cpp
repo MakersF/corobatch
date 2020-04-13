@@ -1,12 +1,13 @@
 #include <algorithm>
-#include <benchmark/benchmark.h>
-#include <random>
-
 #include <array>
 #include <iostream>
+#include <random>
+#include <type_traits>
 #include <vector>
 
 #include <immintrin.h>
+
+#include <benchmark/benchmark.h>
 
 #define COROBATCH_TRANSLATION_UNIT
 #include <corobatch/corobatch.hpp>
@@ -82,68 +83,104 @@ static auto setup_data(std::size_t size)
     return std::make_tuple(as, bs, cs);
 }
 
-struct bumpalloc
+struct poolalloc
 {
-    bumpalloc() = default;
-    bumpalloc(const bumpalloc&) = delete;
-
-    static constexpr std::size_t buffer_size = 1024 * 1024 * 20;
-    char buffer[buffer_size];
-    std::size_t base = 0;
-    std::size_t alloc_count = 0;
-    std::size_t max_total = 0;
-    std::size_t max_count = 0;
-
-    void* allocate(std::size_t align, std::size_t sz)
+    struct header
     {
-        COROBATCH_LOG_DEBUG << "Allocating " << sz << " alignment: " << align << " with base: " << base;
-        std::size_t size_left = buffer_size - base;
-        void* ptr = buffer + base;
-        if (std::align(align, sz, ptr, size_left) == nullptr)
-        {
-            printf("Exhausted the memory");
-            std::terminate();
-        }
-        base = buffer_size - size_left + sz;
-        alloc_count++;
-        max_total = std::max(max_total, base);
-        max_count = std::max(max_count, alloc_count);
-        return ptr;
+        header* next;
+        size_t size;
+    };
+
+    header* root = nullptr;
+    size_t total = 0;
+    size_t alloc_count = 0;
+
+    poolalloc() = default;
+    poolalloc(const poolalloc&) = delete;
+    poolalloc(poolalloc&& other) : root(other.root), total(other.total), alloc_count(other.alloc_count)
+    {
+        other.root = nullptr;
+        other.total = 0;
+        other.alloc_count = 0;
     }
 
-    void deallocate(void*, size_t sz)
+    ~poolalloc()
     {
-        COROBATCH_LOG_INFO << "Deallocating " << sz;
-        alloc_count--;
-        if (alloc_count == 0)
+        auto current = root;
+        while (current)
         {
-            base = 0;
+            auto next = current->next;
+            std::free(current);
+            current = next;
         }
+        COROBATCH_LOG_INFO << "allocs " << alloc_count << " total " << total;
     }
 
-    ~bumpalloc() { COROBATCH_LOG_DEBUG << "allocs " << max_count << " total " << max_total; }
+    void* allocate(size_t align, size_t sz)
+    {
+        COROBATCH_LOG_DEBUG << "alloc!";
+        assert(sz >= sizeof(header));
+        if (root && root->size >= sz)
+        {
+            header* mem = root;
+            root = root->next;
+            mem->~header();
+            return static_cast<void*>(mem);
+        }
+        ++alloc_count;
+        total += sz;
+
+        return std::aligned_alloc(align, sz);
+    }
+
+    void deallocate(void* p, size_t sz)
+    {
+        COROBATCH_LOG_DEBUG << "free!";
+        assert(sz >= sizeof(header));
+        auto new_entry = new (p) header;
+        new_entry->size = sz;
+        new_entry->next = root;
+        root = new_entry;
+    }
+
+    template<typename T>
+    struct Allocator
+    {
+        Allocator(poolalloc& poolalloc) : d_poolalloc(poolalloc) {}
+
+        poolalloc& d_poolalloc;
+
+        using value_type = T;
+
+        template<typename Q>
+        struct rebind
+        {
+            using other = Allocator<Q>;
+        };
+
+        T* allocate(std::size_t num) { return static_cast<T*>(d_poolalloc.allocate(alignof(T), sizeof(T) * num)); }
+
+        void deallocate(T* ptr, std::size_t num) { d_poolalloc.deallocate(static_cast<void*>(ptr), sizeof(T) * num); }
+
+        bool operator==(const Allocator& o) { return &d_poolalloc == &o.d_poolalloc; }
+    };
 };
 
-static bumpalloc globalbumpalloc;
+static poolalloc globalpoolalloc;
 
 template<typename T>
-struct GlobalBumpAllocator
+struct GlobalPoolAllocator : poolalloc::Allocator<T>
 {
-    using value_type = T;
+    GlobalPoolAllocator() : poolalloc::Allocator<T>(globalpoolalloc) {}
 
     template<typename Q>
     struct rebind
     {
-        using other = GlobalBumpAllocator<Q>;
+        using other = GlobalPoolAllocator<Q>;
     };
-
-    T* allocate(std::size_t num) { return static_cast<T*>(globalbumpalloc.allocate(alignof(T), sizeof(T) * num)); }
-
-    void deallocate(T* ptr, std::size_t num) { globalbumpalloc.deallocate(static_cast<void*>(ptr), sizeof(T) * num); }
-
-    bool operator==(const GlobalBumpAllocator&) { return true; }
 };
 
+template<bool declare_callback_type, bool use_custom_promise_allocator>
 float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& bs, const std::vector<float>& cs)
 {
     float sum = 0;
@@ -152,8 +189,15 @@ float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& 
         sum += result;
     };
 
-    using task = corobatch::task_type<>::with_return<float>::with_callback<decltype(
-        onDone)>::with_alloc<GlobalBumpAllocator<void>>::task;
+    using task_param = corobatch::task_param<float>;
+    // Declare the type of the callback if the parameter is true
+    using task_callback = std::
+        conditional_t<declare_callback_type, typename task_param::template with_callback<decltype(onDone)>, task_param>;
+    // Use the custom allocator for promises if the parameter is true
+    using task_allocator = std::conditional_t<use_custom_promise_allocator,
+                                              typename task_callback::template with_alloc<GlobalPoolAllocator<void>>,
+                                              task_callback>;
+    using task = typename task_allocator::task;
     auto action = [](float a, float b, float c, auto&& fmadd) -> task {
         float d = co_await fmadd(a, b, c);
         co_return d;
@@ -189,17 +233,20 @@ static void BM_fma_loop(benchmark::State& state)
 // Register the function as a benchmark
 BENCHMARK(BM_fma_loop)->Range(8, 8 << 10);
 
-// Define another benchmark
+template<bool declare_callback_type, bool use_custom_promise_allocator>
 static void BM_fma_corobatch(benchmark::State& state)
 {
     const auto& [as, bs, cs] = setup_data(state.range(0));
     for (auto _ : state)
     {
-        float sum = fma_corobatch_sum(as, bs, cs);
+        float sum = fma_corobatch_sum<declare_callback_type, use_custom_promise_allocator>(as, bs, cs);
         benchmark::DoNotOptimize(sum);
         benchmark::ClobberMemory();
     }
 }
-BENCHMARK(BM_fma_corobatch)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, false, false)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, true, false)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, false, true)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, true, true)->Range(8, 8 << 10);
 
 BENCHMARK_MAIN();
