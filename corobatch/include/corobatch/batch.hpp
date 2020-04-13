@@ -383,16 +383,15 @@ struct Accumulator {
 
 namespace private_ {
 
-template<ConceptAccumulator Accumulator, typename ArgsList>
+template<ConceptAccumulator Accumulator, typename ArgsList, typename Allocator>
 class BatcherBase;
 
-template<ConceptAccumulator Accumulator, typename... Args>
-class BatcherBase<Accumulator, ArgTypeList<Args...>> : public IBatcher
+template<ConceptAccumulator Accumulator, typename... Args, typename Allocator>
+class BatcherBase<Accumulator, ArgTypeList<Args...>, Allocator> : public IBatcher
 {
 private:
     using NoRefAccumulator = std::remove_reference_t<Accumulator>;
 
-    // Optimization?: put the batch in some other ref counted storage, possibly in the batcher
     struct Batch : std::enable_shared_from_this<Batch>
     {
         Batch(Accumulator& accumulator)
@@ -467,7 +466,10 @@ private:
     };
 
 public:
-    BatcherBase(Accumulator accumulator) : d_accumulator(MY_FWD(accumulator)), d_current_batch(make_new_batch()) {}
+    BatcherBase(Accumulator accumulator, Allocator allocator = Allocator{})
+    : d_accumulator(MY_FWD(accumulator)), d_allocator(MY_FWD(allocator)), d_current_batch(make_new_batch())
+    {
+    }
 
     ~BatcherBase()
     {
@@ -502,18 +504,20 @@ public:
 
 private:
     Accumulator d_accumulator;
+    Allocator d_allocator;
     std::shared_ptr<Batch> d_current_batch;
 
-    std::shared_ptr<Batch> make_new_batch() { return std::make_shared<Batch>(d_accumulator); }
+    std::shared_ptr<Batch> make_new_batch() { return std::allocate_shared<Batch>(d_allocator, d_accumulator); }
 };
 
 } // namespace private_
 
-template<ConceptAccumulator Accumulator>
-class Batcher : public private_::BatcherBase<Accumulator, typename std::remove_reference_t<Accumulator>::Args>
+template<ConceptAccumulator Accumulator, typename Allocator = std::allocator<void>>
+class Batcher
+: public private_::BatcherBase<Accumulator, typename std::remove_reference_t<Accumulator>::Args, Allocator>
 {
 private:
-    using Base = private_::BatcherBase<Accumulator, typename std::remove_reference_t<Accumulator>::Args>;
+    using Base = private_::BatcherBase<Accumulator, typename std::remove_reference_t<Accumulator>::Args, Allocator>;
 
 public:
     using Base::Base;
@@ -521,6 +525,9 @@ public:
 
 template<ConceptAccumulator Accumulator>
 Batcher(Accumulator&&) -> Batcher<Accumulator>;
+
+template<ConceptAccumulator Accumulator, typename Allocator>
+Batcher(Accumulator&&, Allocator) -> Batcher<Accumulator, Allocator>;
 
 template<typename... Accumulators>
 auto make_batchers(Accumulators&&... accumulators)

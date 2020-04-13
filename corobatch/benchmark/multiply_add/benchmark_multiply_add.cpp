@@ -148,6 +148,11 @@ struct poolalloc
     {
         Allocator(poolalloc& poolalloc) : d_poolalloc(poolalloc) {}
 
+        template<typename Q>
+        Allocator(const Allocator<Q> o) : Allocator(o.d_poolalloc)
+        {
+        }
+
         poolalloc& d_poolalloc;
 
         using value_type = T;
@@ -180,7 +185,7 @@ struct GlobalPoolAllocator : poolalloc::Allocator<T>
     };
 };
 
-template<bool declare_callback_type, bool use_custom_promise_allocator>
+template<bool declare_callback_type, bool use_custom_promise_allocator, bool use_custom_batch_allocator>
 float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& bs, const std::vector<float>& cs)
 {
     float sum = 0;
@@ -205,7 +210,18 @@ float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& 
 
     FusedMulAdd fmaddAccumulator;
     corobatch::Executor executor;
-    auto fmadd = corobatch::Batcher<FusedMulAdd>(fmaddAccumulator);
+    poolalloc batchallocator;
+    auto fmadd = [&]() {
+        if constexpr (use_custom_batch_allocator)
+        {
+            return corobatch::Batcher(fmaddAccumulator, poolalloc::Allocator<void>(batchallocator));
+        }
+        else
+        {
+            return corobatch::Batcher(fmaddAccumulator);
+        }
+    }();
+
     for (std::size_t i = 0; i < as.size(); i++)
     {
         corobatch::submit(executor, onDone, action(as[i], bs[i], cs[i], fmadd));
@@ -233,20 +249,21 @@ static void BM_fma_loop(benchmark::State& state)
 // Register the function as a benchmark
 BENCHMARK(BM_fma_loop)->Range(8, 8 << 10);
 
-template<bool declare_callback_type, bool use_custom_promise_allocator>
+template<bool declare_callback_type, bool use_custom_promise_allocator, bool use_custom_batch_allocator>
 static void BM_fma_corobatch(benchmark::State& state)
 {
     const auto& [as, bs, cs] = setup_data(state.range(0));
     for (auto _ : state)
     {
-        float sum = fma_corobatch_sum<declare_callback_type, use_custom_promise_allocator>(as, bs, cs);
+        float sum = fma_corobatch_sum<declare_callback_type, use_custom_promise_allocator, use_custom_batch_allocator>(as, bs, cs);
         benchmark::DoNotOptimize(sum);
         benchmark::ClobberMemory();
     }
 }
-BENCHMARK_TEMPLATE(BM_fma_corobatch, false, false)->Range(8, 8 << 10);
-BENCHMARK_TEMPLATE(BM_fma_corobatch, true, false)->Range(8, 8 << 10);
-BENCHMARK_TEMPLATE(BM_fma_corobatch, false, true)->Range(8, 8 << 10);
-BENCHMARK_TEMPLATE(BM_fma_corobatch, true, true)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, false, false, false)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, true, false, false)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, false, true, false)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, false, false, true)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, true, true, true)->Range(8, 8 << 10);
 
 BENCHMARK_MAIN();
