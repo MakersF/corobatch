@@ -157,7 +157,7 @@ auto vectorAccumulator(Executor ex, F fun)
     return VectorAccumulator<Executor, F, R, Arg, OtherArgs...>(ex, fun);
 }
 
-template<ConceptAccumulator Accumulator>
+template<typename Accumulator>
 class SizedAccumulator : public Accumulator
 {
 private:
@@ -215,7 +215,7 @@ concept HasSize = requires(T& obj)
 }; // namespace private_
 
 // Specialization for types which already keep track of their size
-template<ConceptAccumulator Accumulator>
+template<typename Accumulator>
 requires private_::HasSize<typename Accumulator::AccumulationStorage> class SizedAccumulator<Accumulator>
 : public Accumulator
 {
@@ -237,10 +237,10 @@ private:
     std::optional<std::size_t> d_maxBatchSize;
 };
 
-template<ConceptAccumulator Accumulator>
+template<typename Accumulator>
 SizedAccumulator(Accumulator&&, std::optional<std::size_t>) -> SizedAccumulator<Accumulator>;
 
-template<ConceptAccumulator Accumulator, typename WaitState>
+template<typename Accumulator, typename WaitState>
 class WaitableAccumulator : public Accumulator
 {
 private:
@@ -274,7 +274,7 @@ private:
     WaitState d_waitState;
 };
 
-template<ConceptAccumulator Accumulator, typename WaitState>
+template<typename Accumulator, typename WaitState>
 WaitableAccumulator(Accumulator&& accumulator, WaitState&& waitState) -> WaitableAccumulator<Accumulator, WaitState>;
 
 struct MTWaitState

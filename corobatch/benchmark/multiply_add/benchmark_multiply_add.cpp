@@ -54,7 +54,8 @@ public:
         return i;
     }
 
-    void execute(AccumulationStorage&& s, corobatch::private_::CallbackType<ExecutedResults> cb) const
+    template<typename Callback>
+    void execute(AccumulationStorage&& s, Callback cb) const
     {
         // This could be invoked when the size less than 8.
         // It is fine, we'll simply have garbage for the index that weren't set,
@@ -185,7 +186,40 @@ struct GlobalPoolAllocator : poolalloc::Allocator<T>
     };
 };
 
-template<bool declare_callback_type, bool use_custom_promise_allocator, bool use_custom_batch_allocator>
+struct SingleExecutorRescheduler
+{
+    static inline constexpr std::size_t max_coros_in_batch = 8;
+
+    SingleExecutorRescheduler(corobatch::Executor& e) : d_executor(e) {}
+
+    void reschedule()
+    {
+        d_executor.schedule_all({d_waiting_coros.begin(), d_waiting_coros.begin() + d_num_pending});
+        d_num_pending = 0;
+    }
+
+    void park(corobatch::Executor& e, std::experimental::coroutine_handle<> h)
+    {
+        assert(&d_executor == &e &&
+               "All the tasks must be executed on the same executor to use the SingleExecutorRescheduler");
+        assert(d_num_pending < max_coros_in_batch);
+        d_waiting_coros[d_num_pending] = h;
+        d_num_pending++;
+    }
+
+    std::size_t num_pending() const { return d_num_pending; }
+
+    bool empty() const { return d_num_pending == 0; }
+
+    corobatch::Executor& d_executor;
+    std::array<std::experimental::coroutine_handle<>, max_coros_in_batch> d_waiting_coros;
+    std::size_t d_num_pending = 0;
+};
+
+template<bool declare_callback_type,
+         bool use_custom_promise_allocator,
+         bool use_custom_batch_allocator,
+         bool use_custom_coro_rescheduler>
 float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& bs, const std::vector<float>& cs)
 {
     float sum = 0;
@@ -212,9 +246,18 @@ float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& 
     corobatch::Executor executor;
     poolalloc batchallocator;
     auto fmadd = [&]() {
-        if constexpr (use_custom_batch_allocator)
+        if constexpr (use_custom_batch_allocator and use_custom_coro_rescheduler)
+        {
+            return corobatch::Batcher(
+                fmaddAccumulator, poolalloc::Allocator<void>(batchallocator), SingleExecutorRescheduler(executor));
+        }
+        else if constexpr (use_custom_batch_allocator)
         {
             return corobatch::Batcher(fmaddAccumulator, poolalloc::Allocator<void>(batchallocator));
+        }
+        else if constexpr (use_custom_coro_rescheduler)
+        {
+            return corobatch::Batcher(fmaddAccumulator, SingleExecutorRescheduler(executor));
         }
         else
         {
@@ -249,21 +292,27 @@ static void BM_fma_loop(benchmark::State& state)
 // Register the function as a benchmark
 BENCHMARK(BM_fma_loop)->Range(8, 8 << 10);
 
-template<bool declare_callback_type, bool use_custom_promise_allocator, bool use_custom_batch_allocator>
+template<bool declare_callback_type,
+         bool use_custom_promise_allocator,
+         bool use_custom_batch_allocator,
+         bool use_custom_coro_rescheduler>
 static void BM_fma_corobatch(benchmark::State& state)
 {
     const auto& [as, bs, cs] = setup_data(state.range(0));
     for (auto _ : state)
     {
-        float sum = fma_corobatch_sum<declare_callback_type, use_custom_promise_allocator, use_custom_batch_allocator>(as, bs, cs);
+        float sum = fma_corobatch_sum<declare_callback_type,
+                                      use_custom_promise_allocator,
+                                      use_custom_batch_allocator,
+                                      use_custom_coro_rescheduler>(as, bs, cs);
         benchmark::DoNotOptimize(sum);
         benchmark::ClobberMemory();
     }
 }
-BENCHMARK_TEMPLATE(BM_fma_corobatch, false, false, false)->Range(8, 8 << 10);
-BENCHMARK_TEMPLATE(BM_fma_corobatch, true, false, false)->Range(8, 8 << 10);
-BENCHMARK_TEMPLATE(BM_fma_corobatch, false, true, false)->Range(8, 8 << 10);
-BENCHMARK_TEMPLATE(BM_fma_corobatch, false, false, true)->Range(8, 8 << 10);
-BENCHMARK_TEMPLATE(BM_fma_corobatch, true, true, true)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, false, false, false, false)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, true, false, false, false)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, true, true, false, false)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, true, true, true, false)->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(BM_fma_corobatch, true, true, true, true)->Range(8, 8 << 10);
 
 BENCHMARK_MAIN();

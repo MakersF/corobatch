@@ -139,7 +139,11 @@ public:
         task get_return_object() { return task{*this}; }
 
         std::experimental::suspend_always initial_suspend() { return {}; }
-        void unhandled_exception() noexcept { assert(false && "Unhandled exception in coroutine"); }
+        void unhandled_exception() noexcept
+        {
+            COROBATCH_LOG_ERROR << "Unhandled exception in coroutine";
+            std::terminate();
+        }
         std::experimental::suspend_never final_suspend() { return {}; }
 
         template<typename RebindableAwaitable>
@@ -297,45 +301,58 @@ template<typename T, typename U>
 // Until that is fixed, alway assume it's true
 concept ConceptIsSame = true;
 
+template<typename T, template<class...> class Trait>
+concept TraitIsTrue = Trait<T>::value;
+
+template<typename T>
+concept Allocator = requires(T& allocator, std::size_t size)
+{
+    allocator.allocate(size);
+};
+
 // This template is never called, it's only used in the concept to check that the record_arguments
 // method can take the Args...
 template<typename Accumulator, typename AccumulationStorage, typename... Args>
 auto accumulator_record_arguments(const Accumulator& ac, AccumulationStorage& as, ArgTypeList<Args...>)
     -> decltype(ac.record_arguments(as, std::declval<Args&&>()...));
 
-using ExecutorCoroMap = std::unordered_map<Executor*, std::vector<std::experimental::coroutine_handle<>>>;
-
-template<typename ResultType>
-auto make_callback(std::shared_ptr<void> keep_alive, ExecutorCoroMap& waiting_coros, std::optional<ResultType>& result)
+template<typename ResultType, typename WaitingCoroRescheduler>
+auto make_callback(std::shared_ptr<void> keep_alive,
+                   WaitingCoroRescheduler& waiting_coros_rescheduler,
+                   std::optional<ResultType>& result)
 {
-    return [keep_alive = std::move(keep_alive), &waiting_coros, &result](ResultType results) mutable {
-        assert(not waiting_coros.empty() && "Did you call the callback twice?");
+    return [keep_alive = std::move(keep_alive), &waiting_coros_rescheduler, &result](ResultType results) mutable {
+        assert(not waiting_coros_rescheduler.empty() && "Did you call the callback twice?");
         COROBATCH_LOG_DEBUG << "Batch execution completed with result = " << PrintIfPossible(results);
         result = std::move(results);
-        for (auto& [executor_ptr, coroutines] : waiting_coros)
-        {
-            executor_ptr->schedule_all(coroutines);
-            coroutines.clear();
-        }
-        waiting_coros.clear();
+        waiting_coros_rescheduler.reschedule();
     };
 }
 
-template<typename ResultType>
+template<typename ResultType, typename WaitingCoroRescheduler>
 using CallbackType = decltype(make_callback(std::declval<std::shared_ptr<void*>>(),
-                                            std::declval<ExecutorCoroMap&>(),
+                                            std::declval<WaitingCoroRescheduler&>(),
                                             std::declval<std::optional<ResultType>&>()));
 
 } // namespace private_
 
-template<typename Acc, typename NoRefAcc = std::remove_reference_t<Acc>>
-concept ConceptAccumulator = requires(const Acc& accumulator,
-                                      typename NoRefAcc::AccumulationStorage accumulation_storage,
-                                      typename NoRefAcc::ExecutedResults executed_result,
-                                      typename NoRefAcc::Handle handle,
-                                      typename NoRefAcc::Args args,
-                                      typename NoRefAcc::ResultType result_type,
-                                      private_::CallbackType<typename NoRefAcc::ExecutedResults> ondone_callback)
+template<typename T>
+concept CoroRescheduler = requires(T& rescheduler, Executor& executor, std::experimental::coroutine_handle<> handle)
+{
+    T(rescheduler);
+    rescheduler.reschedule();
+    rescheduler.park(executor, handle);
+};
+
+template<typename Acc, typename WaitingCoroRescheduler, typename NoRefAcc = std::remove_reference_t<Acc>>
+concept ConceptAccumulator =
+    requires(const Acc& accumulator,
+             typename NoRefAcc::AccumulationStorage accumulation_storage,
+             typename NoRefAcc::ExecutedResults executed_result,
+             typename NoRefAcc::Handle handle,
+             typename NoRefAcc::Args args,
+             typename NoRefAcc::ResultType result_type,
+             private_::CallbackType<typename NoRefAcc::ExecutedResults, WaitingCoroRescheduler> ondone_callback)
 {
     {
         args
@@ -383,41 +400,74 @@ struct Accumulator {
 
 namespace private_ {
 
-template<ConceptAccumulator Accumulator, typename ArgsList, typename Allocator>
-class BatcherBase;
+struct MultiExecutorRescheduler
+{
 
-template<ConceptAccumulator Accumulator, typename... Args, typename Allocator>
-class BatcherBase<Accumulator, ArgTypeList<Args...>, Allocator> : public IBatcher
+    ~MultiExecutorRescheduler() { assert(d_waiting_coros.empty() && "Coroutines have not been rescheduled"); }
+
+    void reschedule()
+    {
+        for (auto& [executor_ptr, coroutines] : d_waiting_coros)
+        {
+            executor_ptr->schedule_all(coroutines);
+            coroutines.clear();
+        }
+        d_waiting_coros.clear();
+        d_num_pending = 0;
+    }
+
+    void park(Executor& e, std::experimental::coroutine_handle<> h)
+    {
+        d_waiting_coros[std::addressof(e)].push_back(h);
+        d_num_pending++;
+    }
+
+    std::size_t num_pending() const { return d_num_pending; }
+
+    bool empty() const { return d_num_pending == 0; }
+
+    std::unordered_map<Executor*, std::vector<std::experimental::coroutine_handle<>>> d_waiting_coros;
+    std::size_t d_num_pending;
+};
+
+template<typename Accumulator, private_::Allocator Allocator, CoroRescheduler WaitingCoroRescheduler, typename ArgsList>
+requires ConceptAccumulator<Accumulator, WaitingCoroRescheduler> class BatcherBase;
+
+template<typename Accumulator, private_::Allocator Allocator, CoroRescheduler WaitingCoroRescheduler, typename... Args>
+requires ConceptAccumulator<
+    Accumulator,
+    WaitingCoroRescheduler> class BatcherBase<Accumulator, Allocator, WaitingCoroRescheduler, ArgTypeList<Args...>>
+: public IBatcher
 {
 private:
     using NoRefAccumulator = std::remove_reference_t<Accumulator>;
 
     struct Batch : std::enable_shared_from_this<Batch>
     {
-        Batch(Accumulator& accumulator)
-        : d_accumulator(accumulator), d_storage(d_accumulator.get_accumulation_storage())
+        Batch(Accumulator& accumulator, WaitingCoroRescheduler waiting_coros_rescheduler)
+        : d_accumulator(accumulator)
+        , d_storage(d_accumulator.get_accumulation_storage())
+        , d_waiting_coros_rescheduler(waiting_coros_rescheduler)
         {
             COROBATCH_LOG_DEBUG << "New batch created";
         }
-        ~Batch() { assert(d_waiting_coros.empty()); }
 
         void execute()
         {
             COROBATCH_LOG_DEBUG << "Executing batch";
-            assert(not d_waiting_coros.empty() && "Do not execute empty batches");
+            assert(not d_waiting_coros_rescheduler.empty() && "Do not execute empty batches");
             // Aliasing pointer to share ownership to the batch, but without the need
             // to expose the type.
             // This allows to have the callback type be dependent only on the result type
             auto keep_alive = std::shared_ptr<void>(this->shared_from_this(), nullptr);
             d_accumulator.execute(std::move(d_storage),
-                                  make_callback(std::move(keep_alive), d_waiting_coros, d_result));
+                                  make_callback(std::move(keep_alive), d_waiting_coros_rescheduler, d_result));
         }
 
         const Accumulator& d_accumulator;
         typename NoRefAccumulator::AccumulationStorage d_storage;
         std::optional<typename NoRefAccumulator::ExecutedResults> d_result;
-        // Optimization?: find a better way to map back to the executors where to schedule the coroutine
-        std::unordered_map<Executor*, std::vector<std::experimental::coroutine_handle<>>> d_waiting_coros;
+        WaitingCoroRescheduler d_waiting_coros_rescheduler;
     };
 
     struct Awaitable
@@ -434,7 +484,7 @@ private:
 
         std::experimental::coroutine_handle<> await_suspend(std::experimental::coroutine_handle<> h)
         {
-            d_batch->d_waiting_coros[std::addressof(d_executor)].push_back(h);
+            d_batch->d_waiting_coros_rescheduler.park(d_executor, h);
             std::optional<std::experimental::coroutine_handle<>> next_coro = d_executor.pop_next_coro();
             if (next_coro)
             {
@@ -466,15 +516,39 @@ private:
     };
 
 public:
-    BatcherBase(Accumulator accumulator, Allocator allocator = Allocator{})
-    : d_accumulator(MY_FWD(accumulator)), d_allocator(MY_FWD(allocator)), d_current_batch(make_new_batch())
+    template<typename A = Allocator, typename R = WaitingCoroRescheduler>
+    requires private_::TraitIsTrue<A, std::is_default_constructible>and
+        private_::TraitIsTrue<R, std::is_default_constructible>
+        BatcherBase(Accumulator accumulator) : BatcherBase(MY_FWD(accumulator), Allocator(), WaitingCoroRescheduler())
+    {
+    }
+
+    template<typename T, typename R = WaitingCoroRescheduler>
+    requires private_::Allocator<T>and private_::TraitIsTrue<R, std::is_default_constructible>
+        BatcherBase(Accumulator accumulator, T allocator)
+    : BatcherBase(MY_FWD(accumulator), MY_FWD(allocator), WaitingCoroRescheduler())
+    {
+    }
+
+    template<typename T, typename A = Allocator>
+        requires(not private_::Allocator<T>) and private_::TraitIsTrue<A, std::is_default_constructible> BatcherBase(
+                                                     Accumulator accumulator, T coro_scheduler)
+    : BatcherBase(MY_FWD(accumulator), Allocator(), MY_FWD(coro_scheduler))
+    {
+    }
+
+    BatcherBase(Accumulator accumulator, Allocator allocator, WaitingCoroRescheduler coro_scheduler)
+    : d_accumulator(MY_FWD(accumulator))
+    , d_allocator(MY_FWD(allocator))
+    , d_original_coro_scheduler(MY_FWD(coro_scheduler))
+    , d_current_batch(make_new_batch())
     {
     }
 
     ~BatcherBase()
     {
-        assert(d_current_batch->d_waiting_coros.empty() &&
-               "Force the execution of the batch if it has any pending coroutines");
+        assert(d_current_batch.use_count() == 1 &&
+               "The batcher is being destroyed but some task is still pending waiting for a result from this batch");
     }
 
     RebindableAwaitable operator()(Args... args)
@@ -494,7 +568,7 @@ public:
         return awaitable;
     }
 
-    int getNumPendingCoros() const override { return d_current_batch->d_waiting_coros.size(); }
+    int getNumPendingCoros() const override { return d_current_batch->d_waiting_coros_rescheduler.num_pending(); }
 
     void executeBatch() override
     {
@@ -505,29 +579,52 @@ public:
 private:
     Accumulator d_accumulator;
     Allocator d_allocator;
+    WaitingCoroRescheduler d_original_coro_scheduler; // instantiate others copying this one
     std::shared_ptr<Batch> d_current_batch;
 
-    std::shared_ptr<Batch> make_new_batch() { return std::allocate_shared<Batch>(d_allocator, d_accumulator); }
+    std::shared_ptr<Batch> make_new_batch()
+    {
+        return std::allocate_shared<Batch>(d_allocator, d_accumulator, d_original_coro_scheduler);
+    }
 };
 
+using default_batch_allocator = std::allocator<void>;
+using default_batch_rescheduler = MultiExecutorRescheduler;
 } // namespace private_
 
-template<ConceptAccumulator Accumulator, typename Allocator = std::allocator<void>>
-class Batcher
-: public private_::BatcherBase<Accumulator, typename std::remove_reference_t<Accumulator>::Args, Allocator>
+template<typename Accumulator,
+         private_::Allocator Allocator = private_::default_batch_allocator,
+         CoroRescheduler WaitingCoroRescheduler = private_::default_batch_rescheduler>
+requires ConceptAccumulator<Accumulator, WaitingCoroRescheduler> class Batcher
+: public private_::
+      BatcherBase<Accumulator, Allocator, WaitingCoroRescheduler, typename std::remove_reference_t<Accumulator>::Args>
 {
 private:
-    using Base = private_::BatcherBase<Accumulator, typename std::remove_reference_t<Accumulator>::Args, Allocator>;
+    using Base = private_::BatcherBase<Accumulator,
+                                       Allocator,
+                                       WaitingCoroRescheduler,
+                                       typename std::remove_reference_t<Accumulator>::Args>;
 
 public:
     using Base::Base;
 };
 
-template<ConceptAccumulator Accumulator>
-Batcher(Accumulator&&) -> Batcher<Accumulator>;
+template<typename Accumulator>
+requires ConceptAccumulator<Accumulator, private_::default_batch_rescheduler> Batcher(Accumulator&&)
+    -> Batcher<Accumulator>;
 
-template<ConceptAccumulator Accumulator, typename Allocator>
-Batcher(Accumulator&&, Allocator) -> Batcher<Accumulator, Allocator>;
+template<typename Accumulator, private_::Allocator Allocator>
+requires ConceptAccumulator<Accumulator, private_::default_batch_rescheduler> Batcher(Accumulator&&, Allocator)
+    -> Batcher<Accumulator, Allocator, private_::default_batch_rescheduler>;
+
+template<typename Accumulator, typename Rescheduler>
+    requires(not private_::Allocator<Rescheduler>) and
+    ConceptAccumulator<Accumulator, Rescheduler> Batcher(Accumulator&&, Rescheduler)
+        -> Batcher<Accumulator, private_::default_batch_allocator, Rescheduler>;
+
+template<typename Accumulator, private_::Allocator Allocator, typename Rescheduler>
+requires ConceptAccumulator<Accumulator, Rescheduler> Batcher(Accumulator&&, Allocator, Rescheduler)
+    -> Batcher<Accumulator, Allocator, Rescheduler>;
 
 template<typename... Accumulators>
 auto make_batchers(Accumulators&&... accumulators)
