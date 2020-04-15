@@ -23,7 +23,6 @@ class Executor
 {
 public:
     Executor() = default;
-    // Optimization?: provide a hint on # of concurrent tasks, reserve the space in the queue
     Executor(const Executor&) = delete;
     Executor& operator=(const Executor&) = delete;
 
@@ -43,7 +42,6 @@ public:
     void schedule_all(std::span<std::experimental::coroutine_handle<>> new_coros)
     {
         d_ready_coroutines.insert(d_ready_coroutines.end(), new_coros.begin(), new_coros.end());
-        COROBATCH_LOG_DEBUG << "Coroutines scheduled for execution";
     }
 
     std::optional<std::experimental::coroutine_handle<>> pop_next_coro()
@@ -115,7 +113,8 @@ struct promise_return<void, Callback> : promise_callback_storage<Callback>
 
 template<typename T,
          typename Callback = typename private_::FunctionCallback<T>::type,
-         typename Allocator = std::allocator<void>>
+         typename Allocator = std::allocator<void>,
+         typename Executor = corobatch::Executor>
 class task
 {
 public:
@@ -184,18 +183,18 @@ private:
         return other;
     }
 
-    template<typename OnDone, typename R, typename C, typename A>
-    friend void submit(Executor&, OnDone&&, task<R, C, A>);
+    template<typename E, typename OnDone, typename R, typename C, typename A>
+    friend void submit(E&, OnDone&&, task<R, C, A, E>);
 
     explicit task(promise_type& promise) : d_handle(Handle::from_promise(promise)) {}
 
     Handle d_handle;
 };
 
-template<typename OnDone, typename ReturnType, typename Callback, typename Allocator>
-void submit(Executor& executor, OnDone&& onDone, task<ReturnType, Callback, Allocator> taskObj)
+template<typename Executor, typename OnDone, typename ReturnType, typename Callback, typename Allocator>
+void submit(Executor& executor, OnDone&& onDone, task<ReturnType, Callback, Allocator, Executor> taskObj)
 {
-    typename task<ReturnType, Callback, Allocator>::Handle coro_handle = std::move(taskObj).handle();
+    typename task<ReturnType, Callback, Allocator, Executor>::Handle coro_handle = std::move(taskObj).handle();
     coro_handle.promise().set_on_return_value_cb(MY_FWD(onDone));
     coro_handle.promise().bind_executor(executor);
     coro_handle.resume();
@@ -203,20 +202,25 @@ void submit(Executor& executor, OnDone&& onDone, task<ReturnType, Callback, Allo
 
 template<typename T,
          typename Callback_ = typename private_::FunctionCallback<T>::type,
-         typename Allocator_ = std::allocator<void>>
+         typename Allocator_ = std::allocator<void>,
+         typename Executor_ = corobatch::Executor>
 struct task_param
 {
     using ReturnType = T;
     using Callback = Callback_;
     using Allocator = Allocator_;
+    using Executor = Executor_;
 
     template<typename NewAllocator>
-    using with_alloc = task_param<T, Callback, NewAllocator>;
+    using with_alloc = task_param<T, Callback, NewAllocator, Executor>;
 
     template<typename NewCallback>
-    using with_callback = task_param<T, NewCallback, Allocator>;
+    using with_callback = task_param<T, NewCallback, Allocator, Executor>;
 
-    using task = task<ReturnType, Callback, Allocator>;
+    template<typename NewExecutor>
+    using with_executor = task_param<T, Callback, Allocator, NewExecutor>;
+
+    using task = task<ReturnType, Callback, Allocator, Executor>;
 };
 
 class IBatcher
@@ -326,6 +330,7 @@ auto make_callback(std::shared_ptr<void> keep_alive,
         COROBATCH_LOG_DEBUG << "Batch execution completed with result = " << PrintIfPossible(results);
         result = std::move(results);
         waiting_coros_rescheduler.reschedule();
+        COROBATCH_LOG_DEBUG << "Call to reschedule() completed";
     };
 }
 
@@ -334,15 +339,22 @@ using CallbackType = decltype(make_callback(std::declval<std::shared_ptr<void*>>
                                             std::declval<WaitingCoroRescheduler&>(),
                                             std::declval<std::optional<ResultType>&>()));
 
-} // namespace private_
-
 template<typename T>
-concept CoroRescheduler = requires(T& rescheduler, Executor& executor, std::experimental::coroutine_handle<> handle)
+concept CoroReschedulerWithoutPark = requires(T& rescheduler)
 {
     T(rescheduler);
     rescheduler.reschedule();
+};
+
+template<typename T, typename Executor>
+concept CoroRescheduler = CoroReschedulerWithoutPark<T>and requires(T& rescheduler,
+                                                                    Executor& executor,
+                                                                    std::experimental::coroutine_handle<> handle)
+{
     rescheduler.park(executor, handle);
 };
+
+} // namespace private_
 
 template<typename Acc, typename WaitingCoroRescheduler, typename NoRefAcc = std::remove_reference_t<Acc>>
 concept ConceptAccumulator =
@@ -430,10 +442,16 @@ struct MultiExecutorRescheduler
     std::size_t d_num_pending;
 };
 
-template<typename Accumulator, private_::Allocator Allocator, CoroRescheduler WaitingCoroRescheduler, typename ArgsList>
+template<typename Accumulator,
+         private_::Allocator Allocator,
+         private_::CoroReschedulerWithoutPark WaitingCoroRescheduler,
+         typename ArgsList>
 requires ConceptAccumulator<Accumulator, WaitingCoroRescheduler> class BatcherBase;
 
-template<typename Accumulator, private_::Allocator Allocator, CoroRescheduler WaitingCoroRescheduler, typename... Args>
+template<typename Accumulator,
+         private_::Allocator Allocator,
+         private_::CoroReschedulerWithoutPark WaitingCoroRescheduler,
+         typename... Args>
 requires ConceptAccumulator<
     Accumulator,
     WaitingCoroRescheduler> class BatcherBase<Accumulator, Allocator, WaitingCoroRescheduler, ArgTypeList<Args...>>
@@ -470,6 +488,7 @@ private:
         WaitingCoroRescheduler d_waiting_coros_rescheduler;
     };
 
+    template<typename Executor>
     struct Awaitable
     {
         bool await_ready() { return d_batch->d_result.has_value(); }
@@ -505,9 +524,11 @@ private:
 
     struct RebindableAwaitable
     {
-        Awaitable rebind_executor(Executor& executor) &&
+        template<typename Executor>
+        requires private_::CoroRescheduler<WaitingCoroRescheduler, Executor> Awaitable<Executor>
+            rebind_executor(Executor& executor) &&
         {
-            return Awaitable{executor, MY_FWD(d_batcher_handle), d_batch};
+            return Awaitable<Executor>{executor, MY_FWD(d_batcher_handle), d_batch};
         }
 
         // private:
@@ -594,7 +615,7 @@ using default_batch_rescheduler = MultiExecutorRescheduler;
 
 template<typename Accumulator,
          private_::Allocator Allocator = private_::default_batch_allocator,
-         CoroRescheduler WaitingCoroRescheduler = private_::default_batch_rescheduler>
+         private_::CoroReschedulerWithoutPark WaitingCoroRescheduler = private_::default_batch_rescheduler>
 requires ConceptAccumulator<Accumulator, WaitingCoroRescheduler> class Batcher
 : public private_::
       BatcherBase<Accumulator, Allocator, WaitingCoroRescheduler, typename std::remove_reference_t<Accumulator>::Args>

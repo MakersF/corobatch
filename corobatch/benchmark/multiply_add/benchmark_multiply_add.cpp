@@ -186,11 +186,12 @@ struct GlobalPoolAllocator : poolalloc::Allocator<T>
     };
 };
 
+template<typename Executor>
 struct SingleExecutorRescheduler
 {
     static inline constexpr std::size_t max_coros_in_batch = 8;
 
-    SingleExecutorRescheduler(corobatch::Executor& e) : d_executor(e) {}
+    SingleExecutorRescheduler(Executor& e) : d_executor(e) {}
 
     void reschedule()
     {
@@ -198,7 +199,7 @@ struct SingleExecutorRescheduler
         d_num_pending = 0;
     }
 
-    void park(corobatch::Executor& e, std::experimental::coroutine_handle<> h)
+    void park(Executor& e, std::experimental::coroutine_handle<> h)
     {
         assert(&d_executor == &e &&
                "All the tasks must be executed on the same executor to use the SingleExecutorRescheduler");
@@ -211,15 +212,102 @@ struct SingleExecutorRescheduler
 
     bool empty() const { return d_num_pending == 0; }
 
-    corobatch::Executor& d_executor;
+    Executor& d_executor;
     std::array<std::experimental::coroutine_handle<>, max_coros_in_batch> d_waiting_coros;
     std::size_t d_num_pending = 0;
+};
+
+template<typename Executor>
+SingleExecutorRescheduler(Executor&) -> SingleExecutorRescheduler<Executor>;
+
+template<typename T, std::size_t S>
+struct CircularBuff
+{
+    static constexpr std::size_t t_size = sizeof(T);
+    static constexpr std::size_t max_size = t_size * S;
+
+    alignas(T) std::array<char, max_size> d_mem;
+    std::size_t d_begin = 0;
+    std::size_t d_end = 0;
+    std::size_t d_size = 0;
+
+    bool empty() const { return d_size == 0; }
+    std::size_t size() const { return d_size; }
+
+    T& front()
+    {
+        assert(not empty());
+        return *reinterpret_cast<T*>(d_mem.data() + d_begin);
+    }
+
+    void pop_front()
+    {
+        front().~T();
+        d_begin = (d_begin + t_size) % max_size;
+        d_size--;
+    }
+
+    T* end() { return reinterpret_cast<T*>(d_mem.data() + d_end); }
+
+    template<typename It>
+    void insert(T* pos, It b, It e)
+    {
+        assert(pos == end());
+        assert(size() + std::distance(b, e) <= S);
+        for (It c = b; c != e; ++c)
+        {
+            new (static_cast<void*>(end())) T(*c);
+            d_end = (d_end + t_size) % max_size;
+            d_size++;
+        }
+    }
+};
+
+class FixedSizeExecutor
+{
+public:
+    FixedSizeExecutor() = default;
+    // Optimization?: provide a hint on # of concurrent tasks, reserve the space in the queue
+    FixedSizeExecutor(const FixedSizeExecutor&) = delete;
+    FixedSizeExecutor& operator=(const FixedSizeExecutor&) = delete;
+
+    void run()
+    {
+        while (not d_ready_coroutines.empty())
+        {
+            std::experimental::coroutine_handle<> next = d_ready_coroutines.front();
+            d_ready_coroutines.pop_front();
+            next.resume();
+        }
+    }
+
+    ~FixedSizeExecutor() { assert(d_ready_coroutines.empty()); }
+
+    void schedule_all(std::span<std::experimental::coroutine_handle<>> new_coros)
+    {
+        d_ready_coroutines.insert(d_ready_coroutines.end(), new_coros.begin(), new_coros.end());
+    }
+
+    std::optional<std::experimental::coroutine_handle<>> pop_next_coro()
+    {
+        if (d_ready_coroutines.empty())
+        {
+            return std::nullopt;
+        }
+        std::experimental::coroutine_handle<> next_coro = d_ready_coroutines.front();
+        d_ready_coroutines.pop_front();
+        return next_coro;
+    }
+
+private:
+    CircularBuff<std::experimental::coroutine_handle<>, 16> d_ready_coroutines;
 };
 
 template<bool declare_callback_type,
          bool use_custom_promise_allocator,
          bool use_custom_batch_allocator,
-         bool use_custom_coro_rescheduler>
+         bool use_custom_coro_rescheduler,
+         bool use_custom_executor>
 float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& bs, const std::vector<float>& cs)
 {
     float sum = 0;
@@ -236,14 +324,18 @@ float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& 
     using task_allocator = std::conditional_t<use_custom_promise_allocator,
                                               typename task_callback::template with_alloc<GlobalPoolAllocator<void>>,
                                               task_callback>;
-    using task = typename task_allocator::task;
+    // Use the custom executoor for promises if the parameter is true
+    using task_executor = std::conditional_t<use_custom_executor,
+                                             typename task_allocator::template with_executor<FixedSizeExecutor>,
+                                             task_allocator>;
+    using task = typename task_executor::task;
     auto action = [](float a, float b, float c, auto&& fmadd) -> task {
         float d = co_await fmadd(a, b, c);
         co_return d;
     };
 
     FusedMulAdd fmaddAccumulator;
-    corobatch::Executor executor;
+    std::conditional_t<use_custom_executor, FixedSizeExecutor, corobatch::Executor> executor;
     poolalloc batchallocator;
     auto fmadd = [&]() {
         if constexpr (use_custom_batch_allocator and use_custom_coro_rescheduler)
@@ -295,7 +387,8 @@ BENCHMARK(BM_fma_loop)->Range(8, 8 << 10);
 template<bool declare_callback_type,
          bool use_custom_promise_allocator,
          bool use_custom_batch_allocator,
-         bool use_custom_coro_rescheduler>
+         bool use_custom_coro_rescheduler,
+         bool use_custom_executor>
 static void BM_fma_corobatch(benchmark::State& state)
 {
     const auto& [as, bs, cs] = setup_data(state.range(0));
@@ -304,15 +397,56 @@ static void BM_fma_corobatch(benchmark::State& state)
         float sum = fma_corobatch_sum<declare_callback_type,
                                       use_custom_promise_allocator,
                                       use_custom_batch_allocator,
-                                      use_custom_coro_rescheduler>(as, bs, cs);
+                                      use_custom_coro_rescheduler,
+                                      use_custom_executor>(as, bs, cs);
         benchmark::DoNotOptimize(sum);
         benchmark::ClobberMemory();
     }
 }
-BENCHMARK_TEMPLATE(BM_fma_corobatch, false, false, false, false)->Range(8, 8 << 10);
-BENCHMARK_TEMPLATE(BM_fma_corobatch, true, false, false, false)->Range(8, 8 << 10);
-BENCHMARK_TEMPLATE(BM_fma_corobatch, true, true, false, false)->Range(8, 8 << 10);
-BENCHMARK_TEMPLATE(BM_fma_corobatch, true, true, true, false)->Range(8, 8 << 10);
-BENCHMARK_TEMPLATE(BM_fma_corobatch, true, true, true, true)->Range(8, 8 << 10);
+
+struct CbType
+{
+    static const bool No = false;
+    static const bool Yes = true;
+};
+struct PromPoolAlloc
+{
+    static const bool No = false;
+    static const bool Yes = true;
+};
+struct BatchPoolAlloc
+{
+    static const bool No = false;
+    static const bool Yes = true;
+};
+struct SingleExecResch
+{
+    static const bool No = false;
+    static const bool Yes = true;
+};
+struct RingBuffExec
+{
+    static const bool No = false;
+    static const bool Yes = true;
+};
+
+BENCHMARK_TEMPLATE(
+    BM_fma_corobatch, CbType::No, PromPoolAlloc::No, BatchPoolAlloc::No, SingleExecResch::No, RingBuffExec::No)
+    ->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(
+    BM_fma_corobatch, CbType::Yes, PromPoolAlloc::No, BatchPoolAlloc::No, SingleExecResch::No, RingBuffExec::No)
+    ->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(
+    BM_fma_corobatch, CbType::Yes, PromPoolAlloc::Yes, BatchPoolAlloc::No, SingleExecResch::No, RingBuffExec::No)
+    ->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(
+    BM_fma_corobatch, CbType::Yes, PromPoolAlloc::Yes, BatchPoolAlloc::Yes, SingleExecResch::No, RingBuffExec::No)
+    ->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(
+    BM_fma_corobatch, CbType::Yes, PromPoolAlloc::Yes, BatchPoolAlloc::Yes, SingleExecResch::Yes, RingBuffExec::No)
+    ->Range(8, 8 << 10);
+BENCHMARK_TEMPLATE(
+    BM_fma_corobatch, CbType::Yes, PromPoolAlloc::Yes, BatchPoolAlloc::Yes, SingleExecResch::Yes, RingBuffExec::Yes)
+    ->Range(8, 8 << 10);
 
 BENCHMARK_MAIN();
