@@ -155,3 +155,12 @@ In a single translation unit in your project, defined the macro `COROBATCH_TRANS
 ```
 
 This will make sure to compile the code required in that translation unit only.
+
+## Performances
+
+But how fast is this?
+
+The ideal use case of this library is when batching operations is considerably better tha not batching them. In that case the overhead of the library does not matter much.
+Despite that, the library can execute a single task with an overhead of only `~60ns` in an unfavourable use case (experiment run on a laptop).
+
+The timings can vary a lot depending on your scenario, see the [benchmark](corobatch/benchmark) for more informations.
