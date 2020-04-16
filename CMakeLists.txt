@@ -1,4 +1,4 @@
-# cmake -DCMAKE_CXX_COMPILER=/usr/bin/clang++-11 -DCMAKE_CXX_FLAGS="-DBOOST_ASIO_DISABLE_CONCEPTS" ..
+# cmake -DCMAKE_CXX_COMPILER=/usr/bin/clang++-11 -DCMAKE_BUILD_TYPE=RelWithDEbInfo -DCMAKE_CXX_FLAGS="-DBOOST_ASIO_DISABLE_CONCEPTS" ..
 # The second define is required because of https://github.com/boostorg/asio/issues/312.
 # To get the dependencies:
 # 1. git clone https://github.com/google/libnop.git vendor/libnop
@@ -14,20 +14,23 @@ cmake_minimum_required(VERSION 3.5)
 project ( COROBATCH CXX )
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-add_compile_options(-pedantic -Wall -Wextra -std=gnu++2a -fcoroutines-ts -pthread -nostdinc++ -isystem/usr/lib/llvm-11/include/c++/v1/)
+add_compile_options(-pedantic -Wall -Wextra -Wuninitialized -std=gnu++2a -fcoroutines-ts -pthread -nostdinc++ -isystem/usr/lib/llvm-11/include/c++/v1/)
+add_compile_options( -O3 -g )
 SET(CMAKE_CXX_LINK_FLAGS "${CMAKE_CXX_LINK_FLAGS} -L/usr/lib/llvm-11/lib/")
 
-# add_compile_options( -fsanitize=address )
-# SET(CMAKE_CXX_LINK_FLAGS "${CMAKE_CXX_LINK_FLAGS} -lasan")
+option(COROBATCH_ASAN "Use address sanitizer" OFF)
+if(COROBATCH_ASAN)
+    add_compile_options( -fsanitize=address )
+    SET(CMAKE_CXX_LINK_FLAGS "${CMAKE_CXX_LINK_FLAGS} -lasan")
+endif()
 
 SET(CMAKE_CXX_LINK_FLAGS "${CMAKE_CXX_LINK_FLAGS} -lpthread -lc++ -Wl,-rpath,/usr/lib/llvm-11/lib/")
 
-add_compile_options( -O3 -g )
-# add_compile_options(-g -O0 )
-
-
-# add_compile_options( -flto )
-# SET(CMAKE_CXX_LINK_FLAGS "${CMAKE_CXX_LINK_FLAGS} -flto -fuse-ld=lld-11")
+option(COROBATCH_LTO "Use link time optimization" ON)
+if(COROBATCH_LTO)
+    add_compile_options( -flto )
+    SET(CMAKE_CXX_LINK_FLAGS "${CMAKE_CXX_LINK_FLAGS} -flto -fuse-ld=lld-11")
+endif()
 
 add_library( corobatch INTERFACE )
 target_include_directories( corobatch INTERFACE corobatch/include )
