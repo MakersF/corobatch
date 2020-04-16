@@ -11,9 +11,13 @@
 
 #define COROBATCH_TRANSLATION_UNIT
 #include <corobatch/corobatch.hpp>
+#include <corobatch/utility/allocator.hpp>
+#include <corobatch/utility/executor.hpp>
 
+// Perform a fused multiply add operations on packs of 8 floats
 class FusedMulAdd
 {
+    // Allow to access the pack as an array
     union FloatPack
     {
         __m256 m256;
@@ -84,225 +88,6 @@ static auto setup_data(std::size_t size)
     return std::make_tuple(as, bs, cs);
 }
 
-struct poolalloc
-{
-    struct header
-    {
-        header* next;
-        size_t size;
-    };
-
-    header* root = nullptr;
-    size_t total = 0;
-    size_t alloc_count = 0;
-
-    poolalloc() = default;
-    poolalloc(const poolalloc&) = delete;
-    poolalloc(poolalloc&& other) : root(other.root), total(other.total), alloc_count(other.alloc_count)
-    {
-        other.root = nullptr;
-        other.total = 0;
-        other.alloc_count = 0;
-    }
-
-    ~poolalloc()
-    {
-        auto current = root;
-        while (current)
-        {
-            auto next = current->next;
-            std::free(current);
-            current = next;
-        }
-        COROBATCH_LOG_INFO << "allocs " << alloc_count << " total " << total;
-    }
-
-    void* allocate(size_t align, size_t sz)
-    {
-        COROBATCH_LOG_DEBUG << "alloc!";
-        assert(sz >= sizeof(header));
-        if (root && root->size >= sz)
-        {
-            header* mem = root;
-            root = root->next;
-            mem->~header();
-            return static_cast<void*>(mem);
-        }
-        ++alloc_count;
-        total += sz;
-
-        return std::aligned_alloc(align, sz);
-    }
-
-    void deallocate(void* p, size_t sz)
-    {
-        COROBATCH_LOG_DEBUG << "free!";
-        assert(sz >= sizeof(header));
-        auto new_entry = new (p) header;
-        new_entry->size = sz;
-        new_entry->next = root;
-        root = new_entry;
-    }
-
-    template<typename T>
-    struct Allocator
-    {
-        Allocator(poolalloc& poolalloc) : d_poolalloc(poolalloc) {}
-
-        template<typename Q>
-        Allocator(const Allocator<Q> o) : Allocator(o.d_poolalloc)
-        {
-        }
-
-        poolalloc& d_poolalloc;
-
-        using value_type = T;
-
-        template<typename Q>
-        struct rebind
-        {
-            using other = Allocator<Q>;
-        };
-
-        T* allocate(std::size_t num) { return static_cast<T*>(d_poolalloc.allocate(alignof(T), sizeof(T) * num)); }
-
-        void deallocate(T* ptr, std::size_t num) { d_poolalloc.deallocate(static_cast<void*>(ptr), sizeof(T) * num); }
-
-        bool operator==(const Allocator& o) { return &d_poolalloc == &o.d_poolalloc; }
-    };
-};
-
-static poolalloc globalpoolalloc;
-
-template<typename T>
-struct GlobalPoolAllocator : poolalloc::Allocator<T>
-{
-    GlobalPoolAllocator() : poolalloc::Allocator<T>(globalpoolalloc) {}
-
-    template<typename Q>
-    struct rebind
-    {
-        using other = GlobalPoolAllocator<Q>;
-    };
-};
-
-template<typename Executor>
-struct SingleExecutorRescheduler
-{
-    static inline constexpr std::size_t max_coros_in_batch = 8;
-
-    SingleExecutorRescheduler(Executor& e) : d_executor(e) {}
-
-    void reschedule()
-    {
-        d_executor.schedule_all({d_waiting_coros.begin(), d_waiting_coros.begin() + d_num_pending});
-        d_num_pending = 0;
-    }
-
-    void park(Executor& e, std::experimental::coroutine_handle<> h)
-    {
-        assert(&d_executor == &e &&
-               "All the tasks must be executed on the same executor to use the SingleExecutorRescheduler");
-        assert(d_num_pending < max_coros_in_batch);
-        d_waiting_coros[d_num_pending] = h;
-        d_num_pending++;
-    }
-
-    std::size_t num_pending() const { return d_num_pending; }
-
-    bool empty() const { return d_num_pending == 0; }
-
-    Executor& d_executor;
-    std::array<std::experimental::coroutine_handle<>, max_coros_in_batch> d_waiting_coros;
-    std::size_t d_num_pending = 0;
-};
-
-template<typename Executor>
-SingleExecutorRescheduler(Executor&) -> SingleExecutorRescheduler<Executor>;
-
-template<typename T, std::size_t S>
-struct CircularBuff
-{
-    static constexpr std::size_t t_size = sizeof(T);
-    static constexpr std::size_t max_size = t_size * S;
-
-    alignas(T) std::array<char, max_size> d_mem;
-    std::size_t d_begin = 0;
-    std::size_t d_end = 0;
-    std::size_t d_size = 0;
-
-    bool empty() const { return d_size == 0; }
-    std::size_t size() const { return d_size; }
-
-    T& front()
-    {
-        assert(not empty());
-        return *reinterpret_cast<T*>(d_mem.data() + d_begin);
-    }
-
-    void pop_front()
-    {
-        front().~T();
-        d_begin = (d_begin + t_size) % max_size;
-        d_size--;
-    }
-
-    T* end() { return reinterpret_cast<T*>(d_mem.data() + d_end); }
-
-    template<typename It>
-    void insert(T* pos, It b, It e)
-    {
-        assert(pos == end());
-        assert(size() + std::distance(b, e) <= S);
-        for (It c = b; c != e; ++c)
-        {
-            new (static_cast<void*>(end())) T(*c);
-            d_end = (d_end + t_size) % max_size;
-            d_size++;
-        }
-    }
-};
-
-class FixedSizeExecutor
-{
-public:
-    FixedSizeExecutor() = default;
-    // Optimization?: provide a hint on # of concurrent tasks, reserve the space in the queue
-    FixedSizeExecutor(const FixedSizeExecutor&) = delete;
-    FixedSizeExecutor& operator=(const FixedSizeExecutor&) = delete;
-
-    void run()
-    {
-        while (not d_ready_coroutines.empty())
-        {
-            std::experimental::coroutine_handle<> next = d_ready_coroutines.front();
-            d_ready_coroutines.pop_front();
-            next.resume();
-        }
-    }
-
-    ~FixedSizeExecutor() { assert(d_ready_coroutines.empty()); }
-
-    void schedule_all(std::span<std::experimental::coroutine_handle<>> new_coros)
-    {
-        d_ready_coroutines.insert(d_ready_coroutines.end(), new_coros.begin(), new_coros.end());
-    }
-
-    std::optional<std::experimental::coroutine_handle<>> pop_next_coro()
-    {
-        if (d_ready_coroutines.empty())
-        {
-            return std::nullopt;
-        }
-        std::experimental::coroutine_handle<> next_coro = d_ready_coroutines.front();
-        d_ready_coroutines.pop_front();
-        return next_coro;
-    }
-
-private:
-    CircularBuff<std::experimental::coroutine_handle<>, 16> d_ready_coroutines;
-};
-
 template<bool declare_callback_type,
          bool use_custom_promise_allocator,
          bool use_custom_batch_allocator,
@@ -316,15 +101,20 @@ float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& 
         sum += result;
     };
 
+    static corobatch::PoolAlloc staticPoolAlloc;
+    // At most 8 coroutines will be scheduled at the same time
+    using FixedSizeExecutor = corobatch::FixedSizeExecutor<8>;
+
     using task_param = corobatch::task_param<float>;
     // Declare the type of the callback if the parameter is true
     using task_callback = std::
         conditional_t<declare_callback_type, typename task_param::template with_callback<decltype(onDone)>, task_param>;
     // Use the custom allocator for promises if the parameter is true
-    using task_allocator = std::conditional_t<use_custom_promise_allocator,
-                                              typename task_callback::template with_alloc<GlobalPoolAllocator<void>>,
-                                              task_callback>;
-    // Use the custom executoor for promises if the parameter is true
+    using task_allocator = std::conditional_t<
+        use_custom_promise_allocator,
+        typename task_callback::template with_alloc<corobatch::StaticPoolAllocator<void, &staticPoolAlloc>>,
+        task_callback>;
+    // Use the custom executor for promises if the parameter is true
     using task_executor = std::conditional_t<use_custom_executor,
                                              typename task_allocator::template with_executor<FixedSizeExecutor>,
                                              task_allocator>;
@@ -336,20 +126,21 @@ float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& 
 
     FusedMulAdd fmaddAccumulator;
     std::conditional_t<use_custom_executor, FixedSizeExecutor, corobatch::Executor> executor;
-    poolalloc batchallocator;
+    corobatch::PoolAlloc batchallocator;
     auto fmadd = [&]() {
         if constexpr (use_custom_batch_allocator and use_custom_coro_rescheduler)
         {
-            return corobatch::Batcher(
-                fmaddAccumulator, poolalloc::Allocator<void>(batchallocator), SingleExecutorRescheduler(executor));
+            return corobatch::Batcher(fmaddAccumulator,
+                                      corobatch::PoolAlloc::Allocator<void>(batchallocator),
+                                      corobatch::singleExecutorRescheduler<8>(executor));
         }
         else if constexpr (use_custom_batch_allocator)
         {
-            return corobatch::Batcher(fmaddAccumulator, poolalloc::Allocator<void>(batchallocator));
+            return corobatch::Batcher(fmaddAccumulator, corobatch::PoolAlloc::Allocator<void>(batchallocator));
         }
         else if constexpr (use_custom_coro_rescheduler)
         {
-            return corobatch::Batcher(fmaddAccumulator, SingleExecutorRescheduler(executor));
+            return corobatch::Batcher(fmaddAccumulator, corobatch::singleExecutorRescheduler<8>(executor));
         }
         else
         {
