@@ -21,3 +21,8 @@ print_file corobatch/private_/logging.cpp
 print_file corobatch/private_/log.hpp
 print_file corobatch/batch.hpp
 print_file corobatch/accumulate.hpp
+
+# No need to add corobatch/translation_unit.cpp since it only includes other files, and we manually add them here
+
+print_file corobatch/utility/allocator.hpp
+print_file corobatch/utility/executor.hpp
