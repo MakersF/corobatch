@@ -11,8 +11,24 @@ namespace corobatch {
 
 LoggerCb disabled_logger = [](LogLevel) -> std::ostream* { return nullptr; };
 
+LoggerCb trace_logger = [](LogLevel level) -> std::ostream* {
+    if (level >= LogLevel::TRACE)
+    {
+        return &std::cerr;
+    }
+    return nullptr;
+};
+
 LoggerCb debug_logger = [](LogLevel level) -> std::ostream* {
     if (level >= LogLevel::DEBUG)
+    {
+        return &std::cerr;
+    }
+    return nullptr;
+};
+
+LoggerCb info_logger = [](LogLevel level) -> std::ostream* {
+    if (level >= LogLevel::INFO)
     {
         return &std::cerr;
     }
