@@ -88,6 +88,12 @@ static auto setup_data(std::size_t size)
     return std::make_tuple(as, bs, cs);
 }
 
+// We want a different instance of the static pool for each configuration of the benchmark, as we don't want to share pools across different benchmarks
+template<bool, bool, bool, bool, bool>
+struct static_pool_holder {
+    static inline corobatch::PoolAlloc staticPoolAlloc;
+};
+
 template<bool declare_callback_type,
          bool use_custom_promise_allocator,
          bool use_custom_batch_allocator,
@@ -101,9 +107,10 @@ float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& 
         sum += result;
     };
 
-    static corobatch::PoolAlloc staticPoolAlloc;
     // At most 8 coroutines will be scheduled at the same time
     using FixedSizeExecutor = corobatch::FixedSizeExecutor<8>;
+    using ThisConfigStaticPoolHolder = static_pool_holder<declare_callback_type, use_custom_promise_allocator, use_custom_batch_allocator, use_custom_coro_rescheduler, use_custom_executor>;
+
 
     using task_param = corobatch::task_param<float>;
     // Declare the type of the callback if the parameter is true
@@ -112,7 +119,7 @@ float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& 
     // Use the custom allocator for promises if the parameter is true
     using task_allocator = std::conditional_t<
         use_custom_promise_allocator,
-        typename task_callback::template with_alloc<corobatch::StaticPoolAllocator<void, &staticPoolAlloc>>,
+        typename task_callback::template with_alloc<corobatch::StaticPoolAllocator<void, &ThisConfigStaticPoolHolder::staticPoolAlloc>>,
         task_callback>;
     // Use the custom executor for promises if the parameter is true
     using task_executor = std::conditional_t<use_custom_executor,
