@@ -294,7 +294,7 @@ struct MTWaitState
             std::unique_lock lockguard(d_mutex);
             d_numPending--;
         }
-        d_cv.notify_one();
+        d_cv.notify_all();
     }
 
     void wait_for_completion()
