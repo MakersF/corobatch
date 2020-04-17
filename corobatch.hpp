@@ -1,5 +1,5 @@
-// Generated on Thu 16 Apr 17:50:21 BST 2020
-// Commit: 805b283e3f60668afc9ea727970bd9be22db6760
+// Generated on Fri 17 Apr 12:14:55 BST 2020
+// Commit: 55e1e0ee887eeaf51510d902cca151bfe6ae8d5b
 
 //////////////////////////////////////////////////////////////////////
 // Start file: corobatch/logging.hpp
@@ -260,11 +260,13 @@ public:
 
     void schedule_all(std::span<std::experimental::coroutine_handle<>> new_coros)
     {
+        COROBATCH_LOG_TRACE << "Scheduling " << new_coros.size() << " coroutines";
         d_ready_coroutines.insert(d_ready_coroutines.end(), new_coros.begin(), new_coros.end());
     }
 
     std::optional<std::experimental::coroutine_handle<>> pop_next_coro()
     {
+        COROBATCH_LOG_TRACE << "Popping next coroutine";
         if (d_ready_coroutines.empty())
         {
             return std::nullopt;
@@ -300,6 +302,7 @@ struct promise_callback_storage
 {
     void set_on_return_value_cb(Callback cb)
     {
+        COROBATCH_LOG_TRACE << "Set on return callback";
         assert(not d_cb);
         d_cb.emplace(std::move(cb));
     }
@@ -313,6 +316,7 @@ struct promise_return : promise_callback_storage<Callback>
 {
     void return_value(Q val)
     {
+        COROBATCH_LOG_TRACE << "Returning value";
         assert(this->d_cb);
         (*(this->d_cb))(MY_FWD(val));
     }
@@ -323,6 +327,7 @@ struct promise_return<void, Callback> : promise_callback_storage<Callback>
 {
     void return_void()
     {
+        COROBATCH_LOG_TRACE << "Returning void";
         assert(this->d_cb);
         (*(this->d_cb))();
     }
@@ -346,11 +351,13 @@ public:
     public:
         static void* operator new(size_t sz)
         {
+            COROBATCH_LOG_TRACE << "Allocating promises: " << sz;
             return std::allocator_traits<PromiseAllocator>::allocate(allocator, sz);
         }
 
         static void operator delete(void* p, size_t sz)
         {
+            COROBATCH_LOG_TRACE << "Deallocating promises: " << sz;
             std::allocator_traits<PromiseAllocator>::deallocate(allocator, static_cast<promise_type*>(p), sz);
         }
 
@@ -386,8 +393,10 @@ public:
 
     ~task()
     {
+        COROBATCH_LOG_TRACE << "Task terminating";
         if (d_handle)
         {
+            COROBATCH_LOG_TRACE << "Destructing the associated coroutine";
             d_handle.destroy();
         }
     }
@@ -413,6 +422,7 @@ private:
 template<typename Executor, typename OnDone, typename ReturnType, typename Callback, typename Allocator>
 void submit(Executor& executor, OnDone&& onDone, task<ReturnType, Callback, Allocator, Executor> taskObj)
 {
+    COROBATCH_LOG_TRACE << "Task submitted";
     typename task<ReturnType, Callback, Allocator, Executor>::Handle coro_handle = std::move(taskObj).handle();
     coro_handle.promise().set_on_return_value_cb(MY_FWD(onDone));
     coro_handle.promise().bind_executor(executor);
@@ -549,7 +559,7 @@ auto make_callback(std::shared_ptr<void> keep_alive,
         COROBATCH_LOG_DEBUG << "Batch execution completed with result = " << PrintIfPossible(results);
         result = std::move(results);
         waiting_coros_rescheduler.reschedule();
-        COROBATCH_LOG_DEBUG << "Call to reschedule() completed";
+        COROBATCH_LOG_TRACE << "Call to reschedule() completed";
     };
 }
 
@@ -722,6 +732,7 @@ private:
 
         std::experimental::coroutine_handle<> await_suspend(std::experimental::coroutine_handle<> h)
         {
+            COROBATCH_LOG_TRACE << "Parking coroutine";
             d_batch->d_waiting_coros_rescheduler.park(d_executor, h);
             std::optional<std::experimental::coroutine_handle<>> next_coro = d_executor.pop_next_coro();
             if (next_coro)
@@ -731,6 +742,7 @@ private:
             }
             else
             {
+                COROBATCH_LOG_TRACE << "No coroutine is waiting for execution";
                 return std::experimental::noop_coroutine();
             }
         }
@@ -785,9 +797,13 @@ public:
     {
     }
 
+    BatcherBase(const BatcherBase& other) = delete;
+    BatcherBase(BatcherBase&& other) = default;
+
     ~BatcherBase()
     {
-        assert(d_current_batch.use_count() == 1 &&
+        COROBATCH_LOG_TRACE << "Destructing with count " << d_current_batch.use_count();
+        assert(d_current_batch.use_count() <= 1 &&
                "The batcher is being destroyed but some task is still pending waiting for a result from this batch");
     }
 
@@ -1181,7 +1197,7 @@ struct MTWaitState
             std::unique_lock lockguard(d_mutex);
             d_numPending--;
         }
-        d_cv.notify_one();
+        d_cv.notify_all();
     }
 
     void wait_for_completion()
