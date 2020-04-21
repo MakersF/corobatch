@@ -88,12 +88,34 @@ static auto setup_data(std::size_t size)
     return std::make_tuple(as, bs, cs);
 }
 
-// We want a different instance of the static pool for each configuration of the benchmark, as we don't want to share
-// pools across different benchmarks
-template<bool, bool, bool, bool, bool>
-struct static_pool_holder
+template<typename task, bool use_custom_promise_allocator>
+struct fma_corobatch_action
 {
-    static inline corobatch::PoolAlloc staticPoolAlloc;
+
+    static inline auto action = [](float a, float b, float c, auto& fmadd) -> task {
+        float d = co_await fmadd(a, b, c);
+        co_return d;
+    };
+
+    task invoke(float a, float b, float c, auto& fmadd) { return action(a, b, c, fmadd); }
+};
+
+template<typename task>
+struct fma_corobatch_action<task, true>
+{
+
+    corobatch::PoolAlloc allocator;
+
+    static inline auto action =
+        [](std::allocator_arg_t, auto /* allocator */, float a, float b, float c, auto& fmadd) -> task {
+        float d = co_await fmadd(a, b, c);
+        co_return d;
+    };
+
+    task invoke(float a, float b, float c, auto& fmadd)
+    {
+        return action(std::allocator_arg, allocator.allocator<std::byte>(), a, b, c, fmadd);
+    }
 };
 
 template<bool declare_callback_type,
@@ -111,49 +133,37 @@ float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& 
 
     // At most 8 coroutines will be scheduled at the same time
     using FixedSizeExecutor = corobatch::FixedSizeExecutor<8>;
-    using ThisConfigStaticPoolHolder = static_pool_holder<declare_callback_type,
-                                                          use_custom_promise_allocator,
-                                                          use_custom_batch_allocator,
-                                                          use_custom_coro_rescheduler,
-                                                          use_custom_executor>;
+    using Executor = std::conditional_t<use_custom_executor, FixedSizeExecutor, corobatch::Executor>;
+    Executor executor;
 
     using task_param = corobatch::task_param<float>;
     // Declare the type of the callback if the parameter is true
     using task_callback = std::
         conditional_t<declare_callback_type, typename task_param::template with_callback<decltype(onDone)>, task_param>;
-    // Use the custom allocator for promises if the parameter is true
-    using task_allocator =
-        std::conditional_t<use_custom_promise_allocator,
-                           typename task_callback::template with_alloc<
-                               corobatch::StaticPoolAllocator<void, &ThisConfigStaticPoolHolder::staticPoolAlloc>>,
-                           task_callback>;
-    // Use the custom executor for promises if the parameter is true
-    using task_executor = std::conditional_t<use_custom_executor,
-                                             typename task_allocator::template with_executor<FixedSizeExecutor>,
-                                             task_allocator>;
+    // Use the custom executor if the parameter is true
+    using task_executor = std::
+        conditional_t<use_custom_executor, typename task_callback::template with_executor<Executor>, task_callback>;
     using task = typename task_executor::task;
-    auto action = [](float a, float b, float c, auto&& fmadd) -> task {
-        float d = co_await fmadd(a, b, c);
-        co_return d;
-    };
+
+    fma_corobatch_action<task, use_custom_promise_allocator> action;
 
     FusedMulAdd fmaddAccumulator;
-    std::conditional_t<use_custom_executor, FixedSizeExecutor, corobatch::Executor> executor;
     corobatch::PoolAlloc batchallocator;
     auto fmadd = [&]() {
         if constexpr (use_custom_batch_allocator and use_custom_coro_rescheduler)
         {
-            return corobatch::Batcher(fmaddAccumulator,
-                                      corobatch::PoolAlloc::Allocator<void>(batchallocator),
-                                      corobatch::singleExecutorRescheduler<8>(executor));
+            return corobatch::Batcher(std::allocator_arg,
+                                      batchallocator.allocator<void>(),
+                                      fmaddAccumulator,
+                                      corobatch::fixedSingleExecutorRescheduler<8>(executor));
         }
         else if constexpr (use_custom_batch_allocator)
         {
-            return corobatch::Batcher(fmaddAccumulator, corobatch::PoolAlloc::Allocator<void>(batchallocator));
+            return corobatch::Batcher(std::allocator_arg, batchallocator.allocator<void>(), fmaddAccumulator);
         }
         else if constexpr (use_custom_coro_rescheduler)
         {
-            return corobatch::Batcher(fmaddAccumulator, corobatch::singleExecutorRescheduler<8>(executor));
+            return corobatch::Batcher(fmaddAccumulator, corobatch::fixedSingleExecutorRescheduler<8>(executor));
         }
         else
         {
@@ -163,7 +173,7 @@ float fma_corobatch_sum(const std::vector<float>& as, const std::vector<float>& 
 
     for (std::size_t i = 0; i < as.size(); i++)
     {
-        corobatch::submit(executor, onDone, action(as[i], bs[i], cs[i], fmadd));
+        corobatch::submit(executor, onDone, action.invoke(as[i], bs[i], cs[i], fmadd));
     }
 
     corobatch::force_execution(fmadd);
