@@ -1,0 +1,3 @@
+add_executable( benchmark_remote_call benchmark_remote_call.cpp )
+target_compile_definitions( benchmark_remote_call PRIVATE COROBATCH_DISABLE_LOGGING )
+target_link_libraries( benchmark_remote_call PRIVATE corobatch benchmark benchmark_main )

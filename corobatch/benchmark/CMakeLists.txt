@@ -9,4 +9,5 @@ if(COROBATCH_BENCHMARK)
     set_target_properties( benchmark_main PROPERTIES IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/vendor/benchmark/build/src/libbenchmark_main.a )
 
     add_subdirectory( multiply_add )
+    add_subdirectory( remote_call )
 endif()
