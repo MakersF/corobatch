@@ -114,63 +114,101 @@ struct promise_return<void, Callback> : promise_callback_storage<Callback>
     }
 };
 
+template<typename T, typename Callback, typename Executor>
+struct promise_methods : promise_return<T, Callback>
+{
+    std::experimental::suspend_always initial_suspend() { return {}; }
+    void unhandled_exception() noexcept
+    {
+        COROBATCH_LOG_ERROR << "Unhandled exception in coroutine";
+        std::terminate();
+    }
+    std::experimental::suspend_never final_suspend() { return {}; }
+
+    template<typename RebindableAwaitable>
+    decltype(auto) await_transform(RebindableAwaitable&& awaitable)
+    {
+        assert(d_executor && "The executor needs to be registered in the promise when the task is started");
+        return MY_FWD(awaitable).rebind_executor(*d_executor);
+    }
+
+    void bind_executor(Executor& executor)
+    {
+        assert(d_executor == nullptr);
+        d_executor = std::addressof(executor);
+    }
+
+private:
+    Executor* d_executor = nullptr;
+};
+
+template<typename Allocator>
+struct promise_allocation
+{
+    using ByteAllocator = typename std::allocator_traits<Allocator>::template rebind_alloc<std::byte>;
+
+    template<typename... Args>
+    static void* operator new(std::size_t sz, std::allocator_arg_t, Allocator& allocator, Args&... args)
+    {
+        COROBATCH_LOG_TRACE_BLOCK
+        {
+            COROBATCH_LOG_STREAM << "Allocating new promise with custom allocator " << PrintIfPossible(allocator)
+                                 << " and args";
+            ((COROBATCH_LOG_STREAM << ' ' << PrintIfPossible(args)), ...);
+        }
+        // We allocate with the byte allocator, but we copy the original allocator in the memory
+        ByteAllocator byteAllocator(allocator);
+
+        // Round up sz to next multiple of Allocator alignment
+        std::size_t allocatorOffset = (sz + alignof(Allocator) - 1u) & ~(alignof(Allocator) - 1u);
+        // Call onto allocator to allocate space for coroutine frame.
+        void* ptr = byteAllocator.allocate(allocatorOffset + sizeof(Allocator));
+
+        // Take a copy of the allocator (assuming noexcept copy constructor here)
+        new (((char*) ptr) + allocatorOffset) Allocator(allocator);
+
+        return ptr;
+    }
+
+    static void operator delete(void* ptr, std::size_t sz)
+    {
+        std::size_t allocatorOffset = (sz + alignof(Allocator) - 1u) & ~(alignof(Allocator) - 1u);
+        Allocator& allocator = *reinterpret_cast<Allocator*>(((char*) ptr) + allocatorOffset);
+        COROBATCH_LOG_TRACE << "Deallocating new promise with custom allocator " << PrintIfPossible(allocator);
+
+        // Construct the byte allocator by moving the original allocator first so it isn't freeing its
+        // own memory from underneath itself.
+        // Assuming allocator move-constructor is noexcept here.
+        ByteAllocator byteAllocator(std::move(allocator));
+
+        // But don't forget to destruct allocator object in coroutine frame
+        allocator.~Allocator();
+
+        // Finally, free the memory using the allocator.
+        byteAllocator.deallocate(static_cast<std::byte*>(ptr), allocatorOffset + sizeof(Allocator));
+    }
+};
+
+template<>
+struct promise_allocation<void>
+{
+};
+
 } // namespace private_
 
 template<typename T,
          typename Callback = typename private_::FunctionCallback<T>::type,
-         typename Allocator = std::allocator<void>,
          typename Executor = corobatch::Executor>
 class task
 {
 public:
-    struct promise_type : private_::promise_return<T, Callback>
-    {
-    private:
-        using PromiseAllocator = typename std::allocator_traits<Allocator>::template rebind_alloc<promise_type>;
-        static inline PromiseAllocator allocator;
-
-    public:
-        static void* operator new(size_t sz)
-        {
-            COROBATCH_LOG_TRACE << "Allocating promises: " << sz;
-            return std::allocator_traits<PromiseAllocator>::allocate(allocator, sz);
-        }
-
-        static void operator delete(void* p, size_t sz)
-        {
-            COROBATCH_LOG_TRACE << "Deallocating promises: " << sz;
-            std::allocator_traits<PromiseAllocator>::deallocate(allocator, static_cast<promise_type*>(p), sz);
-        }
-
-        task get_return_object() { return task{*this}; }
-
-        std::experimental::suspend_always initial_suspend() { return {}; }
-        void unhandled_exception() noexcept
-        {
-            COROBATCH_LOG_ERROR << "Unhandled exception in coroutine";
-            std::terminate();
-        }
-        std::experimental::suspend_never final_suspend() { return {}; }
-
-        template<typename RebindableAwaitable>
-        decltype(auto) await_transform(RebindableAwaitable&& awaitable)
-        {
-            assert(d_executor && "The executor needs to be registered in the promise when the task is started");
-            return MY_FWD(awaitable).rebind_executor(*d_executor);
-        }
-
-        void bind_executor(Executor& executor)
-        {
-            assert(d_executor == nullptr);
-            d_executor = std::addressof(executor);
-        }
-
-    private:
-        Executor* d_executor = nullptr;
-    };
-
+    task() = delete;
     task(const task&) = delete;
-    task(task&& other) : d_handle(other.d_handle) { other.d_handle = nullptr; }
+    task(task&& other) : d_handle(other.d_handle), d_promise_ptr(other.d_promise_ptr)
+    {
+        other.d_handle = nullptr;
+        other.d_promise_ptr = nullptr;
+    }
 
     ~task()
     {
@@ -183,54 +221,92 @@ public:
     }
 
 private:
-    using Handle = std::experimental::coroutine_handle<promise_type>;
-
-    Handle handle() &&
+    template<typename Allocator>
+    struct promise
+    : private_::promise_methods<T, Callback, Executor>
+    , private_::promise_allocation<Allocator>
     {
-        Handle other = d_handle;
+        task get_return_object()
+        {
+            return task(std::experimental::coroutine_handle<promise>::from_promise(*this), this);
+        }
+    };
+
+    std::experimental::coroutine_handle<> handle() &&
+    {
+        std::experimental::coroutine_handle<> other = d_handle;
         d_handle = nullptr;
         return other;
     }
 
-    template<typename E, typename OnDone, typename R, typename C, typename A>
-    friend void submit(E&, OnDone&&, task<R, C, A, E>);
+    template<typename E, typename OnDone, typename R, typename C>
+    friend void submit(E&, OnDone&&, task<R, C, E>);
 
-    explicit task(promise_type& promise) : d_handle(Handle::from_promise(promise)) {}
+    template<typename, typename...>
+    friend class std::experimental::coroutine_traits;
 
-    Handle d_handle;
+    explicit task(std::experimental::coroutine_handle<> handle,
+                  private_::promise_methods<T, Callback, Executor>* promise_ptr)
+    : d_handle(handle), d_promise_ptr(promise_ptr)
+    {
+    }
+
+    std::experimental::coroutine_handle<> d_handle;
+    private_::promise_methods<T, Callback, Executor>* d_promise_ptr;
 };
 
-template<typename Executor, typename OnDone, typename ReturnType, typename Callback, typename Allocator>
-void submit(Executor& executor, OnDone&& onDone, task<ReturnType, Callback, Allocator, Executor> taskObj)
+} // namespace corobatch
+
+namespace std::experimental {
+template<typename... TaskArgs, typename... Args>
+struct coroutine_traits<corobatch::task<TaskArgs...>, Args...>
+{
+    using promise_type = typename corobatch::task<TaskArgs...>::template promise<void>;
+};
+
+// Specialize for free functions
+template<typename... TaskArgs, typename Allocator, typename... Args>
+struct coroutine_traits<corobatch::task<TaskArgs...>, std::allocator_arg_t, Allocator, Args...>
+{
+    using promise_type = typename corobatch::task<TaskArgs...>::template promise<Allocator>;
+};
+
+// Specialize for member functions (and lambdas)
+template<typename... TaskArgs, typename Class, typename Allocator, typename... Args>
+struct coroutine_traits<corobatch::task<TaskArgs...>, Class, std::allocator_arg_t, Allocator, Args...>
+{
+    using promise_type = typename corobatch::task<TaskArgs...>::template promise<Allocator>;
+};
+
+} // namespace std::experimental
+
+namespace corobatch {
+
+template<typename Executor, typename OnDone, typename ReturnType, typename Callback>
+void submit(Executor& executor, OnDone&& onDone, task<ReturnType, Callback, Executor> taskObj)
 {
     COROBATCH_LOG_TRACE << "Task submitted";
-    typename task<ReturnType, Callback, Allocator, Executor>::Handle coro_handle = std::move(taskObj).handle();
-    coro_handle.promise().set_on_return_value_cb(MY_FWD(onDone));
-    coro_handle.promise().bind_executor(executor);
-    coro_handle.resume();
+    taskObj.d_promise_ptr->set_on_return_value_cb(MY_FWD(onDone));
+    taskObj.d_promise_ptr->bind_executor(executor);
+    std::move(taskObj).handle().resume();
 }
 
 template<typename T,
          typename Callback_ = typename private_::FunctionCallback<T>::type,
-         typename Allocator_ = std::allocator<void>,
          typename Executor_ = corobatch::Executor>
 struct task_param
 {
     using ReturnType = T;
     using Callback = Callback_;
-    using Allocator = Allocator_;
     using Executor = Executor_;
 
-    template<typename NewAllocator>
-    using with_alloc = task_param<T, Callback, NewAllocator, Executor>;
-
     template<typename NewCallback>
-    using with_callback = task_param<T, NewCallback, Allocator, Executor>;
+    using with_callback = task_param<T, NewCallback, Executor>;
 
     template<typename NewExecutor>
-    using with_executor = task_param<T, Callback, Allocator, NewExecutor>;
+    using with_executor = task_param<T, Callback, NewExecutor>;
 
-    using task = task<ReturnType, Callback, Allocator, Executor>;
+    using task = task<ReturnType, Callback, Executor>;
 };
 
 class IBatcher
@@ -324,11 +400,39 @@ concept Allocator = requires(T& allocator, std::size_t size)
     allocator.allocate(size);
 };
 
-// This template is never called, it's only used in the concept to check that the record_arguments
+// These template is never called, it's only used in the concept to check that the record_arguments
 // method can take the Args...
 template<typename Accumulator, typename AccumulationStorage, typename... Args>
 auto accumulator_record_arguments(const Accumulator& ac, AccumulationStorage& as, ArgTypeList<Args...>)
     -> decltype(ac.record_arguments(as, std::declval<Args&&>()...));
+
+template<typename Accumulator, typename AccumulationStorage, typename... Args>
+auto accumulator_must_execute_with_args(const Accumulator& ac, const AccumulationStorage& as, ArgTypeList<Args...>)
+    -> decltype(ac.must_execute(as, std::declval<const Args&>()...));
+
+template<typename Accumulator, typename AccumulationStorage, typename ArgTypeList>
+concept HasMustExecuteWithArgs = requires(const Accumulator& accumulator,
+                                          AccumulationStorage accumulation_storage,
+                                          ArgTypeList args)
+{
+    {
+        accumulator_must_execute_with_args(accumulator, accumulation_storage, args)
+    }
+    ->ConceptIsSame<bool>;
+};
+
+template<typename Accumulator, typename AccumulationStorage>
+concept HasMustExecuteWithoutArgs = requires(const Accumulator& accumulator, AccumulationStorage accumulation_storage)
+{
+    {
+        accumulator.must_execute(std::as_const(accumulation_storage))
+    }
+    ->private_::ConceptIsSame<bool>;
+};
+
+template<typename Accumulator, typename AccumulationStorage, typename ArgTypeList>
+concept HasMustExecute = HasMustExecuteWithoutArgs<Accumulator, AccumulationStorage> or
+                         HasMustExecuteWithArgs<Accumulator, AccumulationStorage, ArgTypeList>;
 
 template<typename ResultType, typename WaitingCoroRescheduler>
 auto make_callback(std::shared_ptr<void> keep_alive,
@@ -368,13 +472,14 @@ concept CoroRescheduler = CoroReschedulerWithoutPark<T>and requires(T& reschedul
 
 template<typename Acc, typename WaitingCoroRescheduler, typename NoRefAcc = std::remove_reference_t<Acc>>
 concept ConceptAccumulator =
-    requires(const Acc& accumulator,
-             typename NoRefAcc::AccumulationStorage accumulation_storage,
-             typename NoRefAcc::ExecutedResults executed_result,
-             typename NoRefAcc::Handle handle,
-             typename NoRefAcc::Args args,
-             typename NoRefAcc::ResultType result_type,
-             private_::CallbackType<typename NoRefAcc::ExecutedResults, WaitingCoroRescheduler> ondone_callback)
+    private_::HasMustExecute<Acc, typename NoRefAcc::AccumulationStorage, typename NoRefAcc::Args>and requires(
+        const Acc& accumulator,
+        typename NoRefAcc::AccumulationStorage accumulation_storage,
+        typename NoRefAcc::ExecutedResults executed_result,
+        typename NoRefAcc::Handle handle,
+        typename NoRefAcc::Args args,
+        typename NoRefAcc::ResultType result_type,
+        private_::CallbackType<typename NoRefAcc::ExecutedResults, WaitingCoroRescheduler> ondone_callback)
 {
     {
         args
@@ -396,10 +501,6 @@ concept ConceptAccumulator =
         accumulator.get_result(std::move(handle), executed_result)
     }
     ->private_::ConceptIsSame<typename NoRefAcc::ResultType>;
-    {
-        accumulator.must_execute(std::as_const(accumulation_storage))
-    }
-    ->private_::ConceptIsSame<bool>;
 };
 
 // Accumulator implementation format
@@ -552,27 +653,31 @@ public:
     template<typename A = Allocator, typename R = WaitingCoroRescheduler>
     requires private_::TraitIsTrue<A, std::is_default_constructible>and
         private_::TraitIsTrue<R, std::is_default_constructible>
-        BatcherBase(Accumulator accumulator) : BatcherBase(MY_FWD(accumulator), Allocator(), WaitingCoroRescheduler())
+        BatcherBase(Accumulator accumulator)
+    : BatcherBase(std::allocator_arg, Allocator(), MY_FWD(accumulator), WaitingCoroRescheduler())
     {
     }
 
     template<typename T, typename R = WaitingCoroRescheduler>
     requires private_::Allocator<T>and private_::TraitIsTrue<R, std::is_default_constructible>
-        BatcherBase(Accumulator accumulator, T allocator)
-    : BatcherBase(MY_FWD(accumulator), MY_FWD(allocator), WaitingCoroRescheduler())
+        BatcherBase(std::allocator_arg_t, T allocator, Accumulator accumulator)
+    : BatcherBase(std::allocator_arg, MY_FWD(allocator), MY_FWD(accumulator), WaitingCoroRescheduler())
     {
     }
 
     template<typename T, typename A = Allocator>
         requires(not private_::Allocator<T>) and private_::TraitIsTrue<A, std::is_default_constructible> BatcherBase(
                                                      Accumulator accumulator, T coro_scheduler)
-    : BatcherBase(MY_FWD(accumulator), Allocator(), MY_FWD(coro_scheduler))
+    : BatcherBase(std::allocator_arg, Allocator(), MY_FWD(accumulator), MY_FWD(coro_scheduler))
     {
     }
 
-    BatcherBase(Accumulator accumulator, Allocator allocator, WaitingCoroRescheduler coro_scheduler)
-    : d_accumulator(MY_FWD(accumulator))
-    , d_allocator(MY_FWD(allocator))
+    BatcherBase(std::allocator_arg_t,
+                Allocator allocator,
+                Accumulator accumulator,
+                WaitingCoroRescheduler coro_scheduler)
+    : d_allocator(MY_FWD(allocator))
+    , d_accumulator(MY_FWD(accumulator))
     , d_original_coro_scheduler(MY_FWD(coro_scheduler))
     , d_current_batch(make_new_batch())
     {
@@ -595,14 +700,28 @@ public:
             COROBATCH_LOG_STREAM << "Recording parameter";
             ((COROBATCH_LOG_STREAM << ' ' << private_::PrintIfPossible(args)), ...);
         }
-        typename NoRefAccumulator::Handle batcherHandle =
-            d_accumulator.record_arguments(d_current_batch->d_storage, MY_FWD(args)...);
-        RebindableAwaitable awaitable{batcherHandle, d_current_batch};
-        if (d_accumulator.must_execute(d_current_batch->d_storage))
+        if constexpr (private_::HasMustExecuteWithoutArgs<Accumulator, typename NoRefAccumulator::AccumulationStorage>)
         {
-            executeBatch();
+            typename NoRefAccumulator::Handle batcherHandle =
+                d_accumulator.record_arguments(d_current_batch->d_storage, MY_FWD(args)...);
+            RebindableAwaitable awaitable{batcherHandle, d_current_batch};
+            if (d_accumulator.must_execute(std::as_const(d_current_batch->d_storage)))
+            {
+                executeBatch();
+            }
+            return awaitable;
         }
-        return awaitable;
+        else
+        {
+            if (d_accumulator.must_execute(std::as_const(d_current_batch->d_storage), std::as_const(args)...))
+            {
+                executeBatch();
+            }
+            typename NoRefAccumulator::Handle batcherHandle =
+                d_accumulator.record_arguments(d_current_batch->d_storage, MY_FWD(args)...);
+            RebindableAwaitable awaitable{batcherHandle, d_current_batch};
+            return awaitable;
+        }
     }
 
     int getNumPendingCoros() const override { return d_current_batch->d_waiting_coros_rescheduler.num_pending(); }
@@ -614,8 +733,8 @@ public:
     }
 
 private:
-    Accumulator d_accumulator;
     Allocator d_allocator;
+    Accumulator d_accumulator;
     WaitingCoroRescheduler d_original_coro_scheduler; // instantiate others copying this one
     std::shared_ptr<Batch> d_current_batch;
 
@@ -651,8 +770,9 @@ requires ConceptAccumulator<Accumulator, private_::default_batch_rescheduler> Ba
     -> Batcher<Accumulator>;
 
 template<typename Accumulator, private_::Allocator Allocator>
-requires ConceptAccumulator<Accumulator, private_::default_batch_rescheduler> Batcher(Accumulator&&, Allocator)
-    -> Batcher<Accumulator, Allocator, private_::default_batch_rescheduler>;
+requires ConceptAccumulator<Accumulator, private_::default_batch_rescheduler>
+    Batcher(std::allocator_arg_t, Allocator, Accumulator&&)
+        -> Batcher<Accumulator, Allocator, private_::default_batch_rescheduler>;
 
 template<typename Accumulator, typename Rescheduler>
     requires(not private_::Allocator<Rescheduler>) and
@@ -660,8 +780,9 @@ template<typename Accumulator, typename Rescheduler>
         -> Batcher<Accumulator, private_::default_batch_allocator, Rescheduler>;
 
 template<typename Accumulator, private_::Allocator Allocator, typename Rescheduler>
-requires ConceptAccumulator<Accumulator, Rescheduler> Batcher(Accumulator&&, Allocator, Rescheduler)
-    -> Batcher<Accumulator, Allocator, Rescheduler>;
+requires ConceptAccumulator<Accumulator, Rescheduler>
+    Batcher(std::allocator_arg_t, Allocator, Accumulator&&, Rescheduler)
+        -> Batcher<Accumulator, Allocator, Rescheduler>;
 
 template<typename... Accumulators>
 auto make_batchers(Accumulators&&... accumulators)

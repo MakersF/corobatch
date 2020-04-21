@@ -7,8 +7,32 @@
 
 namespace corobatch {
 
+template<std::size_t MaxConcurrentTasksWaitingOnBatch>
+class StaticVector
+{
+public:
+    auto begin() { return d_storage.begin(); }
+
+    auto end() { return d_storage.begin() + d_size; }
+
+    void push_back(const std::experimental::coroutine_handle<>& h)
+    {
+        d_storage[d_size] = h;
+        d_size++;
+    }
+
+    std::experimental::coroutine_handle<>* data() { return d_storage.data(); }
+    void clear() { d_size = 0; }
+    bool empty() const { return d_size == 0; }
+    std::size_t size() const { return d_size; }
+
+private:
+    std::array<std::experimental::coroutine_handle<>, MaxConcurrentTasksWaitingOnBatch> d_storage;
+    std::size_t d_size = 0;
+};
+
 // Can be used when all the tasks are scheduled on the same executor
-template<typename Executor, std::size_t MaxConcurrentTasksWaitingOnBatch>
+template<typename Executor, typename Storage = std::vector<std::experimental::coroutine_handle<>>>
 class SingleExecutorRescheduler
 {
 public:
@@ -18,13 +42,14 @@ public:
     void reschedule()
     {
         assert(d_executor_ptr);
-        d_executor_ptr->schedule_all({d_waiting_coros.begin(), d_waiting_coros.begin() + d_num_pending});
-        d_num_pending = 0;
+        auto span = std::span<std::experimental::coroutine_handle<>>(d_storage.data(), d_storage.size());
+        d_executor_ptr->schedule_all(span);
+        d_storage.clear();
     }
 
     void park(Executor& e, std::experimental::coroutine_handle<> h)
     {
-        COROBATCH_LOG_TRACE << "Parking the handle. Already parked: " << d_num_pending;
+        COROBATCH_LOG_TRACE << "Parking the handle. Already parked: " << d_storage.size();
         if (d_executor_ptr == nullptr)
         {
             d_executor_ptr = &e;
@@ -33,24 +58,26 @@ public:
                "All the tasks must be executed on the same executor to use the SingleExecutorRescheduler");
         assert(d_num_pending < MaxConcurrentTasksWaitingOnBatch &&
                "The number of tasks waiting on the batch was more than the maximum supported");
-        d_waiting_coros[d_num_pending] = h;
-        d_num_pending++;
+        d_storage.push_back(h);
     }
 
-    std::size_t num_pending() const { return d_num_pending; }
+    std::size_t num_pending() const { return d_storage.size(); }
 
-    bool empty() const { return d_num_pending == 0; }
+    bool empty() const { return d_storage.empty(); }
 
 private:
     Executor* d_executor_ptr = nullptr;
-    std::array<std::experimental::coroutine_handle<>, MaxConcurrentTasksWaitingOnBatch> d_waiting_coros;
-    std::size_t d_num_pending = 0;
+    Storage d_storage;
 };
 
+template<typename Executor>
+SingleExecutorRescheduler(Executor& e)
+    -> SingleExecutorRescheduler<Executor, std::vector<std::experimental::coroutine_handle<>>>;
+
 template<std::size_t S, typename Executor>
-SingleExecutorRescheduler<Executor, S> singleExecutorRescheduler(Executor& e)
+SingleExecutorRescheduler<Executor, StaticVector<S>> fixedSingleExecutorRescheduler(Executor& e)
 {
-    return SingleExecutorRescheduler<Executor, S>(e);
+    return SingleExecutorRescheduler<Executor, StaticVector<S>>(e);
 }
 
 namespace private_ {

@@ -63,13 +63,13 @@ struct PrintIfPossible
         else
         {
             // Print as bytes
-            const char* begin = reinterpret_cast<const char*>(&obj.d_value);
-            const char* end = begin + sizeof(obj.d_value);
+            const unsigned char* begin = reinterpret_cast<const unsigned char*>(&obj.d_value);
+            const unsigned char* end = begin + sizeof(obj.d_value);
             std::ios_base::fmtflags previous_flags = os.flags();
             os << "[";
             for (; begin != end; begin++)
             {
-                os << " " << std::showbase << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(*begin);
+                os << " 0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(*begin);
             }
             os << " ]";
             os.flags(previous_flags);
